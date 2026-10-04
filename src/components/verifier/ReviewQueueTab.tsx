@@ -349,8 +349,9 @@ export const ReviewQueueTab: React.FC<ReviewQueueTabProps> = ({
               <span>Sinyal Bukti, Bukan Vonis Otomatis</span>
             </div>
             <p className="text-slate-500 leading-relaxed">
-              Sesuai prinsip etika SELARAS: Sistem tidak pernah menolak klaim secara sepihak. Kontradiksi material selalu dirutekan ke staf verifikator manusia untuk pengecekan dokumen fisik rekam medis.
+              Sesuai prinsip etika JKN Service: Sistem tidak pernah menolak klaim secara sepihak. Kontradiksi material selalu dirutekan ke staf verifikator manusia untuk pengecekan dokumen fisik rekam medis.
             </p>
+
           </div>
         </div>
       </div>

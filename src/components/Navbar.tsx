@@ -34,11 +34,12 @@ export const Navbar: React.FC<NavbarProps> = ({
               </div>
               <div>
                 <div className="flex items-center gap-2">
-                  <span className="font-bold text-xl tracking-tight text-slate-900">SELARAS</span>
+                  <span className="font-bold text-xl tracking-tight text-slate-900">JKN Service</span>
                   <span className="text-[10px] uppercase font-bold tracking-widest px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-200">
                     MVP 2026
                   </span>
                 </div>
+
                 <p className="text-xs text-slate-500 font-medium hidden sm:block">
                   Verifikasi Klaim Dua Sumber • BPJS Kesehatan
                 </p>

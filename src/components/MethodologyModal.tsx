@@ -17,12 +17,13 @@ export const MethodologyModal: React.FC<MethodologyModalProps> = ({ onClose }) =
             </div>
             <div>
               <h2 className="text-base font-bold text-slate-900">
-                Landasan Riset, Matematika & Regulasi SELARAS
+                Landasan Riset, Matematika & Regulasi JKN Service
               </h2>
               <p className="text-xs text-slate-500">
                 Healthkathon 2026 BPJS Kesehatan • Efisiensi Risiko JKN
               </p>
             </div>
+
           </div>
           <button
             onClick={onClose}
@@ -72,8 +73,9 @@ export const MethodologyModal: React.FC<MethodologyModalProps> = ({ onClose }) =
               Penelitian <em>MediQ (NeurIPS 2024)</em> menemukan bahwa jika Large Language Model (LLM) dibiarkan langsung merumuskan dan menanyakan kalimat klinis secara bebas tanpa batasan, penalaran klinis justru menurun dan timbul risiko halusinasi.
             </p>
             <p className="text-xs text-slate-600 mt-2">
-              Oleh karena itu, <strong>SELARAS menggunakan pendekatan hybrid</strong>: AI bertindak sebagai Planner di balik layar yang memilih templat baku tervalidasi klinis dan mengoptimalkan <em>Information Gain</em>, sementara kalimat yang diterima pasien 100% terkunci.
+              Oleh karena itu, <strong>JKN Service menggunakan pendekatan hybrid</strong>: AI bertindak sebagai Planner di balik layar yang memilih templat baku tervalidasi klinis dan mengoptimalkan <em>Information Gain</em>, sementara kalimat yang diterima pasien 100% terkunci.
             </p>
+
           </div>
 
           {/* Section 3: Rumus Bayesian Evidence & Rasio Bukti */}

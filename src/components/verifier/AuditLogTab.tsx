@@ -45,9 +45,10 @@ export const AuditLogTab: React.FC<AuditLogTabProps> = ({ logs }) => {
           <div>
             <div className="font-bold text-slate-900 text-sm">Zero Raw Biometric Storage</div>
             <p className="text-xs text-slate-500 mt-0.5 leading-relaxed">
-              Sistem FRISTA memproses liveness di perangkat/enklave aman. Foto wajah tidak pernah disimpan di basis data verifikasi SELARAS.
+              Sistem FRISTA memproses liveness di perangkat/enklave aman. Foto wajah tidak pernah disimpan di basis data verifikasi JKN Service.
             </p>
           </div>
+
         </div>
 
         <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs flex items-start gap-3">

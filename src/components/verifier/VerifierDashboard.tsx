@@ -61,14 +61,15 @@ export const VerifierDashboard: React.FC<VerifierDashboardProps> = ({
         <div>
           {/* Brand header */}
           <div className="flex items-center gap-2.5 px-3 py-3 mb-4 rounded-xl bg-slate-50 border border-slate-100">
-            <div className="h-7 w-7 rounded-lg bg-emerald-700 flex items-center justify-center text-white text-xs font-bold">
-              S
+            <div className="h-7 w-7 rounded-lg bg-emerald-700 flex items-center justify-center text-white text-[10px] font-extrabold tracking-tighter">
+              JKN
             </div>
             <div>
-              <div className="text-sm font-bold text-slate-900 tracking-tight">SELARAS</div>
+              <div className="text-sm font-bold text-slate-900 tracking-tight">JKN Service</div>
               <div className="text-[10px] text-slate-400 font-medium">Verifikator Hub</div>
             </div>
           </div>
+
 
           {/* Navigation Menu */}
           <nav className="space-y-1">

@@ -1,11 +1,11 @@
-# SELARAS: Verifikasi Klaim Dua Sumber
+# JKN Service: Verifikasi Klaim Dua Sumber
 ### *Solusi Efisiensi Risiko Pelayanan Kesehatan Program JKN*
 **Healthkathon BPJS Kesehatan 2026**
 
 ---
 
 ## 📌 Ringkasan Eksekutif
-**SELARAS** adalah sistem verifikasi klaim dua sumber independen yang menggabungkan:
+**JKN Service** adalah sistem verifikasi klaim dua sumber independen yang menggabungkan:
 1. **Sumber 1**: Dokumen klaim rumah sakit (E-Klaim INA-CBG & Resume Medis).
 2. **Sumber 2**: Pengalaman langsung pasien sebagai saksi independen yang hadir saat layanan diberikan.
 
@@ -16,7 +16,8 @@
 
 ---
 
-## 🚀 Fitur Utama MVP SELARAS
+## 🚀 Fitur Utama MVP JKN Service
+
 
 ### 1. AI Information Gain Planner (Peta Keteramatan)
 - Menerjemahkan kode klinis (ICD-10, ICD-9-CM, BMHP) menjadi bahasa sensorik pasien (contoh: `93.94 Nebulizer` → *"diuap"*, `LOS 4 hari` → *"berapa malam menginap"*).
@@ -97,4 +98,4 @@ Gunakan tombol navigasi di bagian atas:
 
 ---
 
-*SELARAS — Efisiensi Risiko JKN melalui Verifikasi Dua Sumber Cerdas & Beretika.*
+*JKN Service — Efisiensi Risiko JKN melalui Verifikasi Dua Sumber Cerdas & Beretika.*
