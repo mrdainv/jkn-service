@@ -1,32 +1,54 @@
 @import "tailwindcss";
 
+/* Chart palette (dataviz reference instance, light mode). Charts use these roles, never raw hex. */
+:root {
+  color-scheme: light;
+  --surface-1: #fcfcfb;
+  --page: #f6f7f5;
+  --ink-1: #0b0b0b;
+  --ink-2: #52514e;
+  --ink-muted: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --series-5: #e87ba4;
+  --seq-100: #cde2fb;
+  --seq-250: #86b6ef;
+  --seq-450: #2a78d6;
+  --seq-600: #184f95;
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-serious: #ec835a;
+  --status-critical: #d03b3b;
+  --neutral-mid: #c9c8c1;
+}
+
 @layer base {
+  html,
   body {
-    @apply bg-slate-50 text-slate-800 antialiased font-sans selection:bg-emerald-100 selection:text-emerald-900;
+    background: var(--page);
+  }
+  body {
+    @apply text-slate-800 antialiased;
+    font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  }
+  :focus-visible {
+    @apply outline-2 outline-offset-2 outline-emerald-600;
   }
 }
 
-/* Custom scrollbar */
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+.tabular {
+  font-variant-numeric: tabular-nums;
 }
-::-webkit-scrollbar-track {
-  background: #f1f5f9;
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
 }
 ::-webkit-scrollbar-thumb {
   background: #cbd5e1;
-  border-radius: 3px;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: #94a3b8;
-}
-
-@keyframes pulse-subtle {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.85; transform: scale(1.02); }
-}
-
-.animate-pulse-subtle {
-  animation: pulse-subtle 2.5s infinite ease-in-out;
+  border-radius: 4px;
 }
