@@ -98,7 +98,7 @@ Prinsipnya: setiap proporsi tampil dengan n dan interval 95%; di bawah n minimum
 - **Klaim historis**: 100 klaim dari `datasets/1_dataset_klaim_bpjs_sample_training.csv` (Juni 2026). Verifikasinya disimulasikan dengan menjalankan ulang perintah aplikasi yang sama dalam urutan waktu, sehingga data historis mengikuti aturan yang sama dengan penggunaan langsung. Kolom kebenaran dasar dataset hanya mengarahkan jawaban peserta simulasi dan tidak disimpan.
 - **Kamus awal**: 10 entri dari `datasets/2_dataset_kamus_observabilitas_pertanyaan.csv` ditambah dua entri episode.
 - **Kasus demo** (Oktober 2026): `KLM-000101` siap disiapkan, `KLM-000102` tanpa entri kamus untuk tindakan utamanya (Tanya AI), `KLM-000103` menunggu jawaban Budi Santoso, `KLM-000104` sudah dijawab dengan satu pertentangan. Peserta **Yohanes Situmorang** (kartu `0001234500059`) belum punya klaim, untuk mencoba alur dari awal.
-- Nama orang, faskes, dokter, kode faskes, dan kode INA-CBG adalah fiktif. `datasets/3_dataset_evaluasi_ai_1210_kasus.csv` adalah berkas statis dari implementasi sebelumnya dan tidak dipakai aplikasi.
+- Nama orang, faskes, dokter, kode faskes, dan kode INA-CBG adalah fiktif.
 
 ## Struktur kode
 
