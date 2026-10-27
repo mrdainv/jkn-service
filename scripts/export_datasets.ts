@@ -1,7 +1,19 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { generateScoreHistory } from '../src/data/synthetic/history';
-import { scoreLogCsv, toCsv } from '../src/application/exports';
+
+type Cell = string | number | boolean | null;
+
+/** RFC 4180 CSV with CRLF line ends; text that a spreadsheet would run as a formula is prefixed with '. */
+function toCsv(rows: readonly (readonly Cell[])[]): string {
+  const cell = (value: Cell): string => {
+    if (value === null) return '';
+    if (typeof value === 'boolean') return value ? '1' : '0';
+    if (typeof value === 'number') return Number.isFinite(value) ? String(value) : '';
+    const safe = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+    return /[",\r\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
+  };
+  return rows.map((row) => row.map(cell).join(',')).join('\r\n') + '\r\n';
+}
 
 const datasetsDir = path.resolve(process.cwd(), 'datasets');
 const publicDatasetsDir = path.resolve(process.cwd(), 'public/datasets');
@@ -9,11 +21,10 @@ const publicDatasetsDir = path.resolve(process.cwd(), 'public/datasets');
 fs.mkdirSync(datasetsDir, { recursive: true });
 fs.mkdirSync(publicDatasetsDir, { recursive: true });
 
-console.log('Generating Dataset 3: 1,210 AI Quality & Confidence Evaluation Benchmark...');
-const scoreEntries = generateScoreHistory({ endDay: '2026-10-28', days: 60, perDay: 40 }).slice(0, 1210);
-const csvScoreLog = scoreLogCsv(scoreEntries);
-fs.writeFileSync(path.join(datasetsDir, '3_dataset_evaluasi_ai_1210_kasus.csv'), csvScoreLog, 'utf-8');
-fs.writeFileSync(path.join(publicDatasetsDir, '3_dataset_evaluasi_ai_1210_kasus.csv'), csvScoreLog, 'utf-8');
+// Dataset 3 was produced by the score-history generator of the previous implementation, which the
+// claim-verification redesign replaced. The committed CSV is kept as a static file; the live app now
+// records its AI confidence observations as `suggestions` (with outcomes in `answers`) in its database.
+console.log('Dataset 3 (3_dataset_evaluasi_ai_1210_kasus.csv) is a static file; skipping regeneration.');
 
 console.log('Generating Dataset 2: Kamus Observabilitas Klinis & Pertanyaan Awam (URD E6)...');
 const kamusRows: (string | number)[][] = [
@@ -335,4 +346,4 @@ const csvSampleKlaim = toCsv(sampleKlaimRows);
 fs.writeFileSync(path.join(datasetsDir, '1_dataset_klaim_bpjs_sample_training.csv'), csvSampleKlaim, 'utf-8');
 fs.writeFileSync(path.join(publicDatasetsDir, '1_dataset_klaim_bpjs_sample_training.csv'), csvSampleKlaim, 'utf-8');
 
-console.log('Successfully generated all 3 dataset files in datasets/ and public/datasets/');
+console.log('Regenerated datasets 1 and 2 in datasets/ and public/datasets/.');
