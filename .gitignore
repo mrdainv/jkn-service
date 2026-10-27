@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# Simulation database written by plugins/db-file-store.ts (and older prototype state)
+local-data/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
