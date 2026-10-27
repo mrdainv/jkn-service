@@ -16,15 +16,8 @@ function toCsv(rows: readonly (readonly Cell[])[]): string {
 }
 
 const datasetsDir = path.resolve(process.cwd(), 'datasets');
-const publicDatasetsDir = path.resolve(process.cwd(), 'public/datasets');
 
 fs.mkdirSync(datasetsDir, { recursive: true });
-fs.mkdirSync(publicDatasetsDir, { recursive: true });
-
-// Dataset 3 was produced by the score-history generator of the previous implementation, which the
-// claim-verification redesign replaced. The committed CSV is kept as a static file; the live app now
-// records its AI confidence observations as `suggestions` (with outcomes in `answers`) in its database.
-console.log('Dataset 3 (3_dataset_evaluasi_ai_1210_kasus.csv) is a static file; skipping regeneration.');
 
 console.log('Generating Dataset 2: Kamus Observabilitas Klinis & Pertanyaan Awam (URD E6)...');
 const kamusRows: (string | number)[][] = [
@@ -252,7 +245,6 @@ const kamusRows: (string | number)[][] = [
 
 const csvKamus = toCsv(kamusRows);
 fs.writeFileSync(path.join(datasetsDir, '2_dataset_kamus_observabilitas_pertanyaan.csv'), csvKamus, 'utf-8');
-fs.writeFileSync(path.join(publicDatasetsDir, '2_dataset_kamus_observabilitas_pertanyaan.csv'), csvKamus, 'utf-8');
 
 console.log('Generating Dataset 1: Data Sampel Resmi Klaim BPJS (Format RITL)...');
 const sampleKlaimRows: (string | number)[][] = [
@@ -344,6 +336,5 @@ for (let i = 1; i <= 100; i++) {
 
 const csvSampleKlaim = toCsv(sampleKlaimRows);
 fs.writeFileSync(path.join(datasetsDir, '1_dataset_klaim_bpjs_sample_training.csv'), csvSampleKlaim, 'utf-8');
-fs.writeFileSync(path.join(publicDatasetsDir, '1_dataset_klaim_bpjs_sample_training.csv'), csvSampleKlaim, 'utf-8');
 
-console.log('Regenerated datasets 1 and 2 in datasets/ and public/datasets/.');
+console.log('Regenerated datasets 1 and 2 in datasets/.');
