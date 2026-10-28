@@ -5,6 +5,7 @@ import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { SCHEMA_VERSION } from '../../src/domain/types.ts';
 import { createDbMiddleware } from '../db-file-store.ts';
 
 let dir: string;
@@ -24,6 +25,10 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
+const COLLECTIONS = ['participants', 'facilities', 'practitioners', 'claims', 'statusHistory', 'dictionary', 'questions', 'mappings', 'suggestions', 'selections', 'drafts', 'assignments', 'notifications', 'fristaChecks', 'sessions', 'answers', 'aiConfigHistory', 'audit'];
+/** The smallest payload with the database shape the server accepts. */
+const shaped = (a: number) => ({ schemaVersion: SCHEMA_VERSION, synthetic: true, counters: {}, aiConfig: {}, a, ...Object.fromEntries(COLLECTIONS.map((c) => [c, []])) });
+
 const put = (rev: number, db: unknown) =>
   fetch(`${base}/api/db`, { method: 'PUT', headers: { 'content-type': 'application/json', 'x-db-revision': String(rev) }, body: JSON.stringify({ db }) });
 
@@ -31,11 +36,11 @@ describe('db file store', () => {
   it('saves with revisions and rejects stale writes', async () => {
     expect((await fetch(`${base}/api/db`)).status).toBe(404);
     expect(await (await fetch(`${base}/api/db/revision`)).json()).toEqual({ revision: 0 });
-    expect(await (await put(0, { a: 1 })).json()).toMatchObject({ revision: 1 });
-    const stale = await put(0, { a: 2 });
+    expect(await (await put(0, shaped(1))).json()).toMatchObject({ revision: 1 });
+    const stale = await put(0, shaped(2));
     expect(stale.status).toBe(409);
     expect(await stale.json()).toMatchObject({ currentRevision: 1 });
-    expect((await put(1, { a: 3 })).status).toBe(200);
+    expect((await put(1, shaped(3))).status).toBe(200);
     const file = JSON.parse(await readFile(path.join(dir, 'db.json'), 'utf8'));
     expect(file).toMatchObject({ revision: 2, db: { a: 3 } });
     expect(await (await fetch(`${base}/api/db`)).json()).toMatchObject({ revision: 2, db: { a: 3 } });
@@ -45,5 +50,13 @@ describe('db file store', () => {
     expect((await fetch(`${base}/api/db`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: '{}' })).status).toBe(428);
     expect((await fetch(`${base}/api/db`, { method: 'PUT', headers: { 'content-type': 'text/plain', 'x-db-revision': '0' }, body: 'x' })).status).toBe(415);
     expect((await put(0, null)).status).toBe(400);
+  });
+
+  it('rejects a database of another shape or schema version without saving it', async () => {
+    const wrong = await put(0, { a: 1 });
+    expect(wrong.status).toBe(422);
+    expect((await put(0, { ...shaped(1), schemaVersion: SCHEMA_VERSION - 1 })).status).toBe(422);
+    expect((await put(0, { ...shaped(1), answers: 'x' })).status).toBe(422);
+    expect(await (await fetch(`${base}/api/db/revision`)).json()).toEqual({ revision: 0 });
   });
 });

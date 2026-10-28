@@ -1,10 +1,10 @@
 import { ArrowLeft } from 'lucide-react';
 import { useDb } from '../../application/context';
-import { CARE_CLASS_LABEL, CARE_TYPE_LABEL, PROVIDER_STATUS_LABEL } from '../../domain/labels';
+import { CARE_CLASS_LABEL, CARE_TYPE_LABEL, DECISION_LABEL, PROVIDER_STATUS_LABEL } from '../../domain/labels';
 import { findClaim, getParticipant, getPractitioner } from '../../domain/queries';
 import { formatDate, formatDateTime, formatRupiah } from '../../lib/format';
 import { href, useRoute } from '../../lib/router';
-import { ClaimStatusBadge } from '../status';
+import { ClaimStatusBadge, DecisionBadge } from '../status';
 import { Card, Empty, KeyValue, Notice, PageHeader } from '../ui';
 import { td, th } from '../styles';
 
@@ -39,6 +39,7 @@ export function ProviderClaimDetail({ claimId, facilityId }: { claimId: string; 
         title={
           <span className="flex flex-wrap items-center gap-2">
             Klaim <span className="font-mono">{claim.id}</span> <ClaimStatusBadge status={claim.status} view="provider" />
+            {claim.decision && <DecisionBadge outcome={claim.decision.outcome} />}
           </span>
         }
         subtitle={`SEP ${claim.sepNumber} · diajukan ${formatDateTime(claim.submittedAt)}`}
@@ -89,6 +90,12 @@ export function ProviderClaimDetail({ claimId, facilityId }: { claimId: string; 
           </table>
         </Card>
         <Card title="Riwayat status">
+          {claim.decision && (
+            <Notice kind={claim.decision.outcome === 'SESUAI' ? 'success' : 'info'} className="mb-3" title={`Hasil verifikasi: ${DECISION_LABEL[claim.decision.outcome]}`}>
+              Diputuskan {formatDateTime(claim.decision.decidedAt)}.
+              {claim.decision.outcome === 'PERLU_TINDAK_LANJUT' && ' BPJS Kesehatan dapat meminta dokumen pendukung (mis. resume medis).'}
+            </Notice>
+          )}
           <ol className="space-y-3">
             {timeline.map((s) => (
               <li key={s.id} className="border-l-2 border-emerald-200 pl-3">
@@ -98,7 +105,7 @@ export function ProviderClaimDetail({ claimId, facilityId }: { claimId: string; 
             ))}
           </ol>
           <p className="mt-4 text-xs text-slate-500">
-            Selama simulasi, verifikator dapat menanyai peserta tentang layanan yang dialami. Jawaban peserta dan hasil verifikasi tidak dikirim ke faskes.
+            Selama simulasi, verifikator dapat menanyai peserta tentang layanan yang dialami. Faskes menerima hasil keputusan; jawaban peserta, skor, dan alasan keputusan tidak dikirim ke faskes.
           </p>
         </Card>
       </div>

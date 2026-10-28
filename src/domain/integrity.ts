@@ -54,6 +54,8 @@ export function checkIntegrity(db: Db): string[] {
     if (!history.length) fail(`Klaim ${c.id}: tanpa riwayat status`);
     else if (history[history.length - 1].to !== c.status) fail(`Klaim ${c.id}: status ${c.status} tidak sama dengan riwayat terakhir`);
     if ((c.status === 'SELESAI') !== (c.decision !== null)) fail(`Klaim ${c.id}: status SELESAI dan keputusan tidak selaras`);
+    const basisSession = c.decision?.basis.sessionId;
+    if (basisSession && db.sessions.find((x) => x.id === basisSession)?.claimId !== c.id) fail(`Klaim ${c.id}: dasar keputusan menunjuk sesi klaim lain`);
     const active = db.assignments.filter((a) => a.claimId === c.id && a.status === 'AKTIF');
     if (active.length > 1) fail(`Klaim ${c.id}: lebih dari satu putaran aktif`);
   }
@@ -104,8 +106,12 @@ export function checkIntegrity(db: Db): string[] {
     else if (claim.participantId !== a.participantId) fail(`Putaran ${a.id}: peserta berbeda dari klaim`);
     for (const item of a.items) if (!versionExists(item.questionId, item.questionVersion)) fail(`Putaran ${a.id}: ${item.questionId} v${item.questionVersion} tidak ada`);
     if (a.supersededBy && !assignments.has(a.supersededBy)) fail(`Putaran ${a.id}: pengganti tidak ada`);
-    const hasSession = db.sessions.some((s) => s.assignmentId === a.id);
-    if ((a.status === 'DIJAWAB') !== hasSession) fail(`Putaran ${a.id}: status ${a.status} tidak selaras dengan sesi jawaban`);
+    const session = db.sessions.find((s) => s.assignmentId === a.id);
+    const answered = session ? db.answers.filter((x) => x.sessionId === session.id).length : 0;
+    if (a.status === 'DIJAWAB' && !(session?.status === 'SELESAI' && answered > 0)) fail(`Putaran ${a.id}: DIJAWAB tanpa sesi selesai berisi jawaban`);
+    if (a.status === 'AKTIF' && session && session.status !== 'BERLANGSUNG') fail(`Putaran ${a.id}: AKTIF dengan sesi yang sudah selesai`);
+    if (a.status === 'DIGANTIKAN' && session) fail(`Putaran ${a.id}: digantikan padahal sesi sudah dimulai`);
+    if (session?.status === 'BERLANGSUNG' && a.status !== 'AKTIF') fail(`Putaran ${a.id}: sesi berlangsung pada putaran ${a.status}`);
   }
 
   for (const n of db.notifications) {
@@ -127,6 +133,17 @@ export function checkIntegrity(db: Db): string[] {
     sessionPerAssignment.add(s.assignmentId);
     const face = db.fristaChecks.find((f) => f.id === s.fristaCheckId);
     if (!fristas.has(s.fristaCheckId) || face?.result !== 'COCOK' || face.assignmentId !== s.assignmentId) fail(`Sesi ${s.id}: tanpa FRISTA cocok`);
+    if (s.status === 'BERLANGSUNG' && (!s.pending || s.stopReason || s.endedAt)) fail(`Sesi ${s.id}: berlangsung tanpa pertanyaan aktif`);
+    if (s.status === 'SELESAI' && (s.pending || !s.stopReason || !s.endedAt)) fail(`Sesi ${s.id}: selesai tanpa alasan berhenti`);
+    if (s.pending && !a?.items.some((i) => i.questionId === s.pending!.questionId && i.questionVersion === s.pending!.questionVersion)) fail(`Sesi ${s.id}: pertanyaan aktif tidak ada di putaran`);
+    const own = db.answers.filter((x) => x.sessionId === s.id).sort((x, y) => x.iteration - y.iteration);
+    own.forEach((x, i) => {
+      if (x.iteration !== i + 1) fail(`Sesi ${s.id}: urutan iterasi jawaban tidak berurutan`);
+      if (x.claimId !== s.claimId || x.assignmentId !== s.assignmentId) fail(`Jawaban ${x.id}: klaim/putaran berbeda dari sesinya`);
+    });
+    if (new Set(own.map((x) => x.questionId)).size !== own.length) fail(`Sesi ${s.id}: pertanyaan yang sama dijawab dua kali`);
+    if (s.pending && s.pending.iteration !== own.length + 1) fail(`Sesi ${s.id}: iterasi pertanyaan aktif tidak berurutan`);
+    for (const k of s.skipped) if (own.some((x) => x.questionId === k.questionId)) fail(`Sesi ${s.id}: ${k.questionId} dilewati sekaligus dijawab`);
   }
 
   for (const ans of db.answers) {
@@ -135,10 +152,11 @@ export function checkIntegrity(db: Db): string[] {
     if (!a?.items.some((i) => i.questionId === ans.questionId && i.questionVersion === ans.questionVersion)) {
       fail(`Jawaban ${ans.id}: ${ans.questionId} v${ans.questionVersion} tidak diterbitkan di ${ans.assignmentId}`);
     }
-    if (ans.optionId) {
-      const version = questionById.get(ans.questionId)?.versions.find((v) => v.version === ans.questionVersion);
-      if (!version?.options.some((o) => o.id === ans.optionId)) fail(`Jawaban ${ans.id}: pilihan ${ans.optionId} tidak ada`);
-    }
+    const version = questionById.get(ans.questionId)?.versions.find((v) => v.version === ans.questionVersion);
+    if (!version?.options.some((o) => o.id === ans.optionId)) fail(`Jawaban ${ans.id}: pilihan ${ans.optionId} tidak ada`);
+    const sc = ans.scoresAfter;
+    if (![sc.indication, sc.support, ans.evaluation.reliability, ans.pick.predictedDefinite].every((x) => x >= 0 && x <= 1)) fail(`Jawaban ${ans.id}: skor di luar 0–1`);
+    if (sc.indication === 1 && !db.answers.some((x) => x.sessionId === ans.sessionId && x.iteration <= ans.iteration && x.evaluation.denial)) fail(`Jawaban ${ans.id}: indikasi 1 tanpa penyangkalan`);
   }
   return problems;
 }

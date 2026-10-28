@@ -1,6 +1,7 @@
-import { draftSync, rankSync, SIMULATED_MODEL } from '../../ai/simulatedAi';
+import { draftSync, nextSync, rankSync, SIMULATED_MODEL } from '../../ai/simulatedAi';
 import { findProcedure } from '../../ai/reference';
 import {
+  answerQuestion,
   closeExpired,
   declineQuestions,
   decideClaim,
@@ -10,13 +11,13 @@ import {
   recordDraft,
   recordFrista,
   submitClaim,
-  submitResponses,
   SYSTEM_ACTOR,
+  type AiPort,
   type ClaimInput,
 } from '../../application/commands';
 import { claimedNights } from '../../domain/evidence';
 import { claimEvidence, currentAssignment, getClaim, getEntry, getQuestion, getVersion } from '../../domain/queries';
-import type { ActorRef, AnswerOption, CareClass, Db, DecisionOutcome, Gender, Participant, SelectionItem } from '../../domain/types';
+import type { ActorRef, AnswerOption, CareClass, Db, DecisionOutcome, Gender, Participant, ResponseSession, SelectionItem } from '../../domain/types';
 import { SCHEMA_VERSION } from '../../domain/types';
 import { parseCsv } from '../../lib/csv';
 import { hashString, intBetween, pick, prng } from '../../lib/random';
@@ -28,8 +29,9 @@ import { FACILITIES, INA_CBG, INITIAL_AI_CONFIG, initialDictionary, practitioner
 // truth from the dataset only steers the simulated participants and is never stored.
 
 export const DATASET_ID = 'sim-2026-10-27-v1';
-const MODEL = { id: SIMULATED_MODEL.id, version: SIMULATED_MODEL.version };
-const GENERATOR = { ...MODEL, kind: 'SIMULASI_DETERMINISTIK' as const };
+const MODEL = { id: SIMULATED_MODEL.id, version: SIMULATED_MODEL.version, kind: SIMULATED_MODEL.kind };
+/** The simulated AI, called synchronously: the seed replays commands without the async actions layer. */
+const AI: AiPort = { rank: rankSync, next: nextSync };
 
 type Truth = 'SESUAI' | 'BERTENTANGAN' | 'PENYANGKALAN_TOTAL';
 
@@ -96,8 +98,6 @@ function providerActor(facilityId: string): ActorRef {
   const f = FACILITIES.find((x) => x.id === facilityId)!;
   return { role: 'FASKES', id: `USR-${facilityId}`, name: `Petugas klaim ${f.name}` };
 }
-
-const rank = rankSync;
 
 // ── Simulated people ────────────────────────────────────────────────────────
 
@@ -241,7 +241,7 @@ interface Script {
 function schedule(db: Db, t: Timeline, s: Script) {
   const { rand, profile } = s;
   t.at(s.submitAt, () => {
-    const claim = submitClaim(db, s.input, { now: s.submitAt, actor: providerActor(s.input.facilityId) }, rank, MODEL);
+    const claim = submitClaim(db, s.input, { now: s.submitAt, actor: providerActor(s.input.facilityId) }, AI, MODEL);
     const publishAt = plus(s.submitAt, intBetween(rand, 6 * 60, 40 * 60));
     t.at(publishAt, () => {
       const items = verifierSelection(db, claim.id, rand);
@@ -263,7 +263,7 @@ function schedule(db: Db, t: Timeline, s: Script) {
       }
       let at = plus(publishAt, intBetween(rand, 240, 5 * 24 * 60));
       const f = rand();
-      const face = (result: Parameters<typeof recordFrista>[2], when: string) => t.at(when, () => recordFrista(db, assignment.id, result, { now: when, actor }));
+      const face = (result: Parameters<typeof recordFrista>[2], when: string) => t.at(when, () => recordFrista(db, assignment.id, result, { now: when, actor }, AI, MODEL));
       if (f < 0.03) {
         face('TANPA_KAMERA', at);
         scheduleDecision(db, t, claim.id, at, rand, 0.6);
@@ -284,28 +284,41 @@ function schedule(db: Db, t: Timeline, s: Script) {
       }
       face('COCOK', at);
       const startedAt = plus(at, 1);
-      const submitAt = plus(startedAt, intBetween(rand, 2, 6));
-      t.at(submitAt, () => {
-        const claimNow = getClaim(db, claim.id);
-        const nights = claimedNights(claimNow);
+      t.at(startedAt, () => {
+        // One question at a time: each answer is evaluated and the AI picks the next until a stop rule holds.
+        const nights = claimedNights(getClaim(db, claim.id));
         let stayed: string | null = null;
-        let tick = startedAt;
-        const answers = [...assignment.items]
-          .sort((a, b) => a.order - b.order)
-          .map((item) => {
-            const version = getVersion(db, item.questionId, item.questionVersion);
-            const entry = getEntry(db, getQuestion(db, item.questionId).entryId);
-            const kind = entry.topic ?? 'PROSEDUR';
-            const optionId = simulatedAnswer(rand, version.options, kind, profile, nights, entry.observability ?? 0.55, stayed);
-            if (kind === 'KEBERADAAN') stayed = optionId;
-            tick = plus(tick, 0.5 + rand());
-            return { questionId: item.questionId, questionVersion: item.questionVersion, optionId, answeredAt: tick };
-          });
-        submitResponses(db, { assignmentId: assignment.id, answers, startedAt }, { now: submitAt, actor });
-        scheduleDecision(db, t, claim.id, submitAt, rand, 0.96);
+        const ended = answerLoop(db, sessionOf(db, assignment.id), startedAt, actor, (questionId, version) => {
+          const v = getVersion(db, questionId, version);
+          const entry = getEntry(db, getQuestion(db, questionId).entryId);
+          const kind = entry.topic ?? 'PROSEDUR';
+          const optionId = simulatedAnswer(rand, v.options, kind, profile, nights, entry.observability ?? 0.55, stayed);
+          if (kind === 'KEBERADAAN') stayed = optionId;
+          return { optionId, minutes: 0.5 + rand() };
+        });
+        scheduleDecision(db, t, claim.id, ended, rand, 0.96);
       });
     });
   });
+}
+
+function sessionOf(db: Db, assignmentId: string): ResponseSession {
+  const session = db.sessions.find((s) => s.assignmentId === assignmentId);
+  if (!session) throw new Error(`seed: no session for ${assignmentId}`);
+  return session;
+}
+
+/** Answers the session's current question until it ends; returns the time of the last answer. */
+function answerLoop(db: Db, session: ResponseSession, from: string, actor: ActorRef, choose: (questionId: string, version: number) => { optionId: string; minutes: number }): string {
+  let at = from;
+  for (let guard = 0; session.status === 'BERLANGSUNG' && session.pending && guard < 20; guard += 1) {
+    const { questionId, questionVersion } = session.pending;
+    const { optionId, minutes } = choose(questionId, questionVersion);
+    at = plus(at, minutes);
+    answerQuestion(db, { sessionId: session.id, questionId, questionVersion, optionId }, { now: at, actor }, AI, MODEL);
+  }
+  if (session.status !== 'SELESAI') throw new Error(`seed: session ${session.id} did not end`);
+  return at;
 }
 
 function scheduleDecision(db: Db, t: Timeline, claimId: string, after: string, rand: () => number, probability: number) {
@@ -380,8 +393,8 @@ export function buildSeed(): Db {
   t.at(infusionDraftAt, () => {
     const claim = db.claims.find((c) => c.procedures.some((p) => p.code === '99.18'))!;
     const target = { code: '99.18', name: 'Infus cairan elektrolit', category: 'Tindakan' };
-    const response = draftSync({ target, claimContext: { careType: claim.careType, diagnosisName: claim.diagnosis.name }, dictionary: db.dictionary, variant: 0 });
-    const draft = recordDraft(db, { claimId: claim.id, target, response, variant: 0, previousDraftId: null, model: GENERATOR }, { now: infusionDraftAt, actor: VERIFIER });
+    const response = draftSync({ target, claim: { careType: claim.careType }, dictionary: db.dictionary, variant: 0 });
+    const draft = recordDraft(db, { claimId: claim.id, target, response, variant: 0, previousDraftId: null, model: MODEL }, { now: infusionDraftAt, actor: VERIFIER });
     const discardAt = plus(infusionDraftAt, 14);
     t.at(discardAt, () =>
       discardDraft(db, draft.id, 'Hampir semua pasien rawat inap diinfus, jadi pertanyaan ini tidak membedakan. Ditunda sampai panel menilai.', { now: discardAt, actor: VERIFIER }),
@@ -419,7 +432,7 @@ function addDemoCases(db: Db) {
     inaCbg: { code: INA_CBG[dx.code] ?? 'Z-4-10-I', tariff },
     hospitalCharge: charge,
   });
-  const submit = (input: ClaimInput, at: string) => submitClaim(db, input, { now: at, actor: providerActor(input.facilityId) }, rank, MODEL);
+  const submit = (input: ClaimInput, at: string) => submitClaim(db, input, { now: at, actor: providerActor(input.facilityId) }, AI, MODEL);
   const accept = (claimId: string) => db.selections.find((s) => s.claimId === claimId)!.items;
 
   // 1. Waiting for question preparation; every line maps to the dictionary except the blood count.
@@ -436,27 +449,16 @@ function addDemoCases(db: Db) {
   const c4 = submit(claimFor(dewi, 'FKS-03', '0115R003101901', '2026-10-12', '2026-10-17', { code: 'M54.5', name: 'Nyeri punggung bawah' }, [proc('93.39', 10), proc('87.44')], 7_400_000, 8_100_000), wib('2026-10-19', 8, 40));
   const a4 = publishQuestions(db, c4.id, accept(c4.id), { now: wib('2026-10-20', 9, 10), actor: VERIFIER });
   const dewiActor = participantActor(db, dewi.id);
-  recordFrista(db, a4.id, 'COCOK', { now: wib('2026-10-21', 19, 2), actor: dewiActor });
-  const pickFor = (questionId: string, version: number): string => {
+  recordFrista(db, a4.id, 'COCOK', { now: wib('2026-10-21', 19, 2), actor: dewiActor }, AI, MODEL);
+  answerLoop(db, sessionOf(db, a4.id), wib('2026-10-21', 19, 2), dewiActor, (questionId, version) => {
     const v = getVersion(db, questionId, version);
     const entry = getEntry(db, getQuestion(db, questionId).entryId);
-    if (entry.topic === 'KEBERADAAN') return 'DIRAWAT_MENGINAP';
-    if (entry.topic === 'LAMA_RAWAT') return 'N4_7';
-    if (entry.code === '93.39') return v.options.find((o) => o.id.startsWith('BANTAH'))!.id;
-    return v.options.find((o) => o.id.startsWith('DUKUNG'))!.id;
-  };
-  let tick = wib('2026-10-21', 19, 3);
-  submitResponses(
-    db,
-    {
-      assignmentId: a4.id,
-      startedAt: tick,
-      answers: [...a4.items].sort((a, b) => a.order - b.order).map((i) => {
-        tick = plus(tick, 1);
-        return { questionId: i.questionId, questionVersion: i.questionVersion, optionId: pickFor(i.questionId, i.questionVersion), answeredAt: tick };
-      }),
-    },
-    { now: wib('2026-10-21', 19, 9), actor: dewiActor },
-  );
-  if (!currentAssignment(db, c4.id)) throw new Error('seed: demo case 4 has no assignment');
+    const optionId =
+      entry.topic === 'KEBERADAAN' ? 'DIRAWAT_MENGINAP'
+      : entry.topic === 'LAMA_RAWAT' ? 'N4_7'
+      : entry.code === '93.39' ? v.options.find((o) => o.id.startsWith('BANTAH'))!.id
+      : v.options.find((o) => o.id.startsWith('DUKUNG'))!.id;
+    return { optionId, minutes: 1 };
+  });
+  if (currentAssignment(db, c4.id)?.status !== 'DIJAWAB') throw new Error('seed: demo case 4 is not answered');
 }

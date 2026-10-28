@@ -3,55 +3,29 @@ import { useEffect, useRef, useState, type ComponentType, type ReactNode } from 
 import { useAction, useApp } from '../../application/context';
 import { MAX_FACE_FAILURES, RESPONSE_WINDOW_DAYS } from '../../application/commands';
 import { CARE_TYPE_LABEL, FRISTA_LABEL } from '../../domain/labels';
-import { answersOf, currentAssignment, failedFaceChecks, findClaim, getVersion, passedFaceCheck, renderText, sessionFor } from '../../domain/queries';
-import type { ActorRef, FristaResult } from '../../domain/types';
+import { answersOf, currentAssignment, failedFaceChecks, findClaim, getVersion, questionLimit, renderText, sessionFor } from '../../domain/queries';
+import type { ActorRef, FristaResult, PendingQuestion, ResponseSession } from '../../domain/types';
 import { addDays, formatDateLong, formatDateTime, formatPeriod } from '../../lib/format';
 import { href, navigate } from '../../lib/router';
 import { cx } from '../styles';
 
-type Step = 'ringkasan' | 'frista' | 'pertanyaan' | 'periksa';
-
-interface Picked {
-  optionId: string;
-  at: string;
-}
-
-// In-progress answers stay on this device only, so a reload does not lose them. They become shared
-// records only when submitted, all at once.
-function loadDraft(key: string): Record<string, Picked> {
-  try {
-    return JSON.parse(window.localStorage.getItem(key) ?? '{}') as Record<string, Picked>;
-  } catch {
-    return {};
-  }
-}
-
-function saveDraft(key: string, value: Record<string, Picked> | null) {
-  try {
-    if (value) window.localStorage.setItem(key, JSON.stringify(value));
-    else window.localStorage.removeItem(key);
-  } catch {
-    // Storage unavailable: answers are kept in memory for this visit only.
-  }
-}
+type Step = 'ringkasan' | 'frista' | 'pertanyaan';
 
 const big = 'w-full rounded-xl px-4 py-3 text-base font-semibold disabled:opacity-50';
 
+/**
+ * The participant's side of the adaptive session: summary, FRISTA, then one question at a time. Each
+ * answer is saved and evaluated as soon as it is sent; the next question is whatever the session holds.
+ */
 export function ConfirmationFlow({ claimId, actor }: { claimId: string; actor: ActorRef }) {
   const { db, actions } = useApp();
   const claim = findClaim(db, claimId);
   const assignment = claim ? currentAssignment(db, claim.id) : undefined;
-  const draftKey = `jkn-service/jawaban/${assignment?.id ?? 'none'}`;
-  const [step, setStep] = useState<Step>('ringkasan');
-  const [index, setIndex] = useState(0);
-  const [picked, setPicked] = useState<Record<string, Picked>>(() => loadDraft(draftKey));
-  const [startedAt] = useState(() => new Date().toISOString());
+  const session = assignment ? sessionFor(db, assignment.id) : undefined;
+  const [step, setStep] = useState<Step>(() => (session?.status === 'BERLANGSUNG' ? 'pertanyaan' : 'ringkasan'));
   const [confirmDecline, setConfirmDecline] = useState(false);
   const [frista, fristaState] = useAction(actions.recordFrista);
   const [decline, declineState] = useAction(actions.decline);
-  const [submit, submitState] = useAction(actions.submitResponses);
-
-  useEffect(() => saveDraft(draftKey, Object.keys(picked).length ? picked : null), [draftKey, picked]);
 
   if (!claim || claim.participantId !== actor.id) {
     return <Message title="Layanan tidak ditemukan" text="Layanan ini tidak terdaftar atas nama Anda." />;
@@ -68,12 +42,12 @@ export function ConfirmationFlow({ claimId, actor }: { claimId: string; actor: A
     </div>
   );
 
-  const answered = assignment ? sessionFor(db, assignment.id) : undefined;
   if (!assignment) {
     return <Message title="Belum ada pertanyaan" text="Belum ada pertanyaan untuk layanan ini. Anda akan mendapat notifikasi bila ada." top={summary} />;
   }
-  if (answered) {
-    const ans = answersOf(db, answered.id);
+  const answers = session ? [...answersOf(db, session.id)].sort((a, b) => a.iteration - b.iteration) : [];
+  if (session?.status === 'SELESAI' && answers.length > 0) {
+    const notAsked = assignment.items.length - answers.length;
     return (
       <div className="space-y-3 p-4">
         <Back />
@@ -82,28 +56,26 @@ export function ConfirmationFlow({ claimId, actor }: { claimId: string; actor: A
           <h1 className="mt-2 text-lg font-semibold text-slate-900">Jawaban Anda sudah terkirim</h1>
           <p className="text-sm text-slate-700">Terima kasih. Jawaban ini tidak mengubah hak layanan Anda.</p>
           <p className="mt-2 text-xs text-slate-600">
-            Nomor tanda terima <span className="font-mono font-semibold">{answered.id}</span>
+            Nomor tanda terima <span className="font-mono font-semibold">{session.id}</span>
             <br />
-            {formatDateTime(answered.submittedAt)}
+            {formatDateTime(session.endedAt)}
           </p>
         </div>
         {summary}
         <div className="rounded-xl border border-slate-200 bg-white p-4">
           <h2 className="text-sm font-semibold text-slate-900">Jawaban Anda</h2>
           <ol className="mt-2 space-y-2 text-sm">
-            {[...assignment.items]
-              .sort((a, b) => a.order - b.order)
-              .map((item) => {
-                const v = getVersion(db, item.questionId, item.questionVersion);
-                const a = ans.find((x) => x.questionId === item.questionId);
-                return (
-                  <li key={item.questionId}>
-                    <div className="text-slate-600">{renderText(v.text, slots)}</div>
-                    <div className="font-medium text-slate-900">{a?.optionId ? v.options.find((o) => o.id === a.optionId)?.label : 'Dilewati'}</div>
-                  </li>
-                );
-              })}
+            {answers.map((a) => {
+              const v = getVersion(db, a.questionId, a.questionVersion);
+              return (
+                <li key={a.id}>
+                  <div className="text-slate-600">{renderText(v.text, slots)}</div>
+                  <div className="font-medium text-slate-900">{v.options.find((o) => o.id === a.optionId)?.label}</div>
+                </li>
+              );
+            })}
           </ol>
+          {notAsked > 0 && <p className="mt-2 text-xs text-slate-500">{notAsked} pertanyaan lain tidak perlu ditanyakan.</p>}
         </div>
       </div>
     );
@@ -111,74 +83,50 @@ export function ConfirmationFlow({ claimId, actor }: { claimId: string; actor: A
   if (claim.status === 'PERLU_KONTAK') {
     return <Message icon={PhoneCall} title="Petugas BPJS akan menghubungi Anda" text="Verifikasi wajah belum berhasil. Petugas resmi BPJS Kesehatan akan menelepon Anda. Hak layanan Anda tidak berubah." top={summary} />;
   }
-  if (assignment.status === 'DITUTUP' || claim.status === 'DITOLAK_PESERTA' || claim.status === 'TIDAK_DIJAWAB') {
+  if (assignment.status !== 'AKTIF' || claim.status === 'DITOLAK_PESERTA' || claim.status === 'TIDAK_DIJAWAB') {
     return (
       <Message
         icon={Lock}
         title={claim.status === 'DITOLAK_PESERTA' ? 'Anda memilih tidak menjawab' : 'Pertanyaan sudah ditutup'}
-        text={claim.status === 'DITOLAK_PESERTA' ? 'Pilihan Anda sudah dicatat. Hak layanan Anda tidak berubah.' : `Batas waktu menjawab ${RESPONSE_WINDOW_DAYS} hari sudah lewat. Hak layanan Anda tidak berubah.`}
+        text={
+          claim.status === 'DITOLAK_PESERTA'
+            ? 'Pilihan Anda sudah dicatat. Hak layanan Anda tidak berubah.'
+            : session?.stopReason === 'PERTANYAAN_HABIS'
+              ? 'Tidak ada pertanyaan yang perlu Anda jawab untuk layanan ini. Hak layanan Anda tidak berubah.'
+              : `Batas waktu menjawab ${RESPONSE_WINDOW_DAYS} hari sudah lewat. Hak layanan Anda tidak berubah.`
+        }
         top={summary}
       />
     );
   }
 
-  const items = [...assignment.items].sort((a, b) => a.order - b.order);
-  const versions = items.map((i) => getVersion(db, i.questionId, i.questionVersion));
+  const limit = questionLimit(db, assignment, session);
   const deadline = addDays(assignment.publishedAt.slice(0, 10), RESPONSE_WINDOW_DAYS);
-  const verified = !!passedFaceCheck(db, assignment.id);
   const failures = failedFaceChecks(db, assignment.id);
-  const denialAt = items.findIndex((it, k) => versions[k].options.find((o) => o.id === picked[it.questionId]?.optionId)?.denial);
-  const lastIndex = denialAt >= 0 ? denialAt : items.length - 1;
+  const declineBox = confirmDecline ? (
+    <div className="rounded-xl border border-slate-300 bg-white p-3 text-sm">
+      <p>{answers.length ? `Berhenti sekarang? ${answers.length} jawaban yang sudah terkirim tetap tersimpan.` : 'Yakin tidak ingin menjawab? Pilihan ini dicatat dan tidak dapat diubah.'}</p>
+      <div className="mt-2 flex gap-2">
+        <button type="button" className="flex-1 rounded-lg bg-slate-800 px-3 py-2 text-sm font-semibold text-white disabled:opacity-50" disabled={declineState.pending} onClick={() => decline(assignment.id, actor)}>
+          {answers.length ? 'Ya, berhenti' : 'Ya, tidak bersedia'}
+        </button>
+        <button type="button" className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm" onClick={() => setConfirmDecline(false)}>
+          Batal
+        </button>
+      </div>
+      {declineState.error && <p className="mt-2 text-xs text-red-700">{declineState.error}</p>}
+    </div>
+  ) : (
+    <button type="button" className="w-full py-2 text-sm text-slate-500 underline" onClick={() => setConfirmDecline(true)}>
+      {answers.length ? 'Saya ingin berhenti menjawab' : 'Saya tidak bersedia menjawab'}
+    </button>
+  );
 
-  if (step === 'ringkasan') {
+  if (step === 'pertanyaan' && session?.status === 'BERLANGSUNG' && session.pending) {
     return (
-      <div className="space-y-3 p-4">
-        <Back />
-        <h1 className="text-lg font-semibold text-slate-900">Konfirmasi layanan kesehatan</h1>
-        {summary}
-        <ul className="space-y-2 rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-700">
-          <li className="flex gap-2">
-            <Clock className="mt-0.5 h-4 w-4 shrink-0 text-emerald-700" aria-hidden />
-            {items.length} pertanyaan pilihan ganda, sekitar {Math.max(1, Math.round(items.length * 0.5))} menit. Jawab sampai {formatDateLong(deadline)}.
-          </li>
-          <li className="flex gap-2">
-            <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-700" aria-hidden />
-            Sukarela. Menjawab atau tidak, hak layanan Anda tidak berubah. Jawaban tidak dikirim ke rumah sakit.
-          </li>
-          <li className="flex gap-2">
-            <ScanFace className="mt-0.5 h-4 w-4 shrink-0 text-emerald-700" aria-hidden />
-            Sebelum menjawab, wajah Anda dicocokkan lewat FRISTA agar yang menjawab benar Anda.
-          </li>
-          <li className="flex gap-2">
-            <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-700" aria-hidden />
-            Bila tidak ingat, pilih "Tidak ingat". Itu jawaban yang sah.
-          </li>
-        </ul>
-        {assignment.round > 1 && <p className="rounded-lg bg-amber-50 p-2 text-xs text-amber-900">Pertanyaan ini sudah diperbarui oleh BPJS Kesehatan.</p>}
-        <button type="button" className={cx(big, 'bg-emerald-700 text-white')} onClick={() => setStep(verified ? 'pertanyaan' : 'frista')}>
-          Mulai
-        </button>
-        <button type="button" className={cx(big, 'border border-slate-300 bg-white text-slate-700')} onClick={() => navigate('/peserta')}>
-          Nanti saja
-        </button>
-        {confirmDecline ? (
-          <div className="rounded-xl border border-slate-300 bg-white p-3 text-sm">
-            <p>Yakin tidak ingin menjawab? Pilihan ini dicatat dan tidak dapat diubah.</p>
-            <div className="mt-2 flex gap-2">
-              <button type="button" className="flex-1 rounded-lg bg-slate-800 px-3 py-2 text-sm font-semibold text-white disabled:opacity-50" disabled={declineState.pending} onClick={() => decline(assignment.id, actor)}>
-                Ya, tidak bersedia
-              </button>
-              <button type="button" className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm" onClick={() => setConfirmDecline(false)}>
-                Batal
-              </button>
-            </div>
-            {declineState.error && <p className="mt-2 text-xs text-red-700">{declineState.error}</p>}
-          </div>
-        ) : (
-          <button type="button" className="w-full py-2 text-sm text-slate-500 underline" onClick={() => setConfirmDecline(true)}>
-            Saya tidak bersedia menjawab
-          </button>
-        )}
+      <div className="flex min-h-full flex-col p-4">
+        <QuestionStep key={session.pending.iteration} session={session} pending={session.pending} limit={limit} slots={slots} actor={actor} />
+        <div className="mt-2">{declineBox}</div>
       </div>
     );
   }
@@ -203,7 +151,7 @@ export function ConfirmationFlow({ claimId, actor }: { claimId: string; actor: A
           </p>
         )}
         {last?.result === 'LAYANAN_TIDAK_TERSEDIA' && <p className="rounded-lg bg-slate-100 p-2 text-sm text-slate-700">Layanan FRISTA sedang tidak tersedia. Silakan coba lagi nanti; ini tidak dihitung sebagai kegagalan.</p>}
-        {fristaState.error && <p className="rounded-lg bg-red-50 p-2 text-sm text-red-800">{fristaState.error}</p>}
+        {fristaState.error && <p className="rounded-lg bg-red-50 p-2 text-sm text-red-800" role="alert">{fristaState.error}</p>}
         <fieldset className="rounded-xl border border-dashed border-slate-300 bg-white p-3">
           <legend className="px-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">Hasil FRISTA (simulasi)</legend>
           <div className="grid grid-cols-2 gap-2">
@@ -224,109 +172,91 @@ export function ConfirmationFlow({ claimId, actor }: { claimId: string; actor: A
     );
   }
 
-  if (step === 'pertanyaan') {
-    const item = items[index];
-    const v = versions[index];
-    const choice = picked[item.questionId]?.optionId;
-    const isDenial = v.options.find((o) => o.id === choice)?.denial;
-    return (
-      <div className="flex min-h-full flex-col p-4">
-        <div className="mb-3 flex items-center justify-between text-xs text-slate-500">
-          <button type="button" onClick={() => (index === 0 ? setStep('ringkasan') : setIndex(index - 1))} className="flex items-center gap-1 text-sm text-slate-600">
-            <ArrowLeft className="h-4 w-4" aria-hidden /> Kembali
-          </button>
-          <span aria-live="polite">
-            Pertanyaan {index + 1} dari {items.length}
-          </span>
-        </div>
-        <div className="mb-4 h-1.5 rounded-full bg-slate-200">
-          <div className="h-1.5 rounded-full bg-emerald-600" style={{ width: `${((index + 1) / items.length) * 100}%` }} />
-        </div>
-        <fieldset>
-          <legend className="text-lg font-semibold leading-snug text-slate-900">{renderText(v.text, slots)}</legend>
-          <div className="mt-4 space-y-2">
-            {v.options.map((o) => (
-              <label
-                key={o.id}
-                className={cx('flex cursor-pointer items-center gap-3 rounded-xl border-2 bg-white px-4 py-3 text-base', choice === o.id ? 'border-emerald-600 bg-emerald-50' : 'border-slate-200')}
-              >
-                <input
-                  type="radio"
-                  name={`q-${item.questionId}`}
-                  value={o.id}
-                  checked={choice === o.id}
-                  onChange={() => setPicked({ ...picked, [item.questionId]: { optionId: o.id, at: new Date().toISOString() } })}
-                  className="h-5 w-5 accent-emerald-700"
-                />
-                {o.label}
-              </label>
-            ))}
-          </div>
-        </fieldset>
-        {isDenial && index < items.length - 1 && <p className="mt-3 rounded-lg bg-slate-100 p-2 text-sm text-slate-700">Karena Anda tidak pernah ke sana, pertanyaan berikutnya dilewati.</p>}
-        <div className="mt-auto pt-6">
-          <button type="button" className={cx(big, 'bg-emerald-700 text-white')} disabled={!choice} onClick={() => (index >= lastIndex ? setStep('periksa') : setIndex(index + 1))}>
-            {index >= lastIndex ? 'Periksa jawaban' : 'Lanjut'}
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  // Review and submit everything at once.
-  const shown = items.slice(0, lastIndex + 1);
-  const complete = shown.every((it) => picked[it.questionId]);
   return (
     <div className="space-y-3 p-4">
-      <button type="button" onClick={() => { setIndex(lastIndex); setStep('pertanyaan'); }} className="flex items-center gap-1 text-sm text-slate-600">
-        <ArrowLeft className="h-4 w-4" aria-hidden /> Kembali
+      <Back />
+      <h1 className="text-lg font-semibold text-slate-900">Konfirmasi layanan kesehatan</h1>
+      {summary}
+      <ul className="space-y-2 rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-700">
+        <li className="flex gap-2">
+          <Clock className="mt-0.5 h-4 w-4 shrink-0 text-emerald-700" aria-hidden />
+          Hingga {limit} pertanyaan pilihan ganda, satu per satu, sekitar {Math.max(1, Math.round(limit * 0.5))} menit. Jawab sampai {formatDateLong(deadline)}.
+        </li>
+        <li className="flex gap-2">
+          <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-700" aria-hidden />
+          Sukarela. Menjawab atau tidak, hak layanan Anda tidak berubah. Jawaban tidak dikirim ke rumah sakit.
+        </li>
+        <li className="flex gap-2">
+          <ScanFace className="mt-0.5 h-4 w-4 shrink-0 text-emerald-700" aria-hidden />
+          Sebelum menjawab, wajah Anda dicocokkan lewat FRISTA agar yang menjawab benar Anda.
+        </li>
+        <li className="flex gap-2">
+          <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-700" aria-hidden />
+          Setiap jawaban langsung tersimpan; pertanyaan berikutnya menyesuaikan jawaban Anda. Bila tidak ingat, pilih "Tidak ingat". Itu jawaban yang sah.
+        </li>
+      </ul>
+      {assignment.round > 1 && <p className="rounded-lg bg-amber-50 p-2 text-xs text-amber-900">Pertanyaan ini sudah diperbarui oleh BPJS Kesehatan.</p>}
+      <button type="button" className={cx(big, 'bg-emerald-700 text-white')} onClick={() => setStep(session?.status === 'BERLANGSUNG' ? 'pertanyaan' : 'frista')}>
+        {session?.status === 'BERLANGSUNG' ? 'Lanjutkan' : 'Mulai'}
       </button>
-      <h1 className="text-lg font-semibold text-slate-900">Periksa jawaban Anda</h1>
-      <ol className="space-y-2">
-        {shown.map((it, k) => {
-          const v = versions[k];
-          return (
-            <li key={it.questionId} className="rounded-xl border border-slate-200 bg-white p-3">
-              <div className="text-sm text-slate-600">{renderText(v.text, slots)}</div>
-              <div className="mt-1 flex items-center justify-between gap-2">
-                <span className="text-base font-semibold text-slate-900">{v.options.find((o) => o.id === picked[it.questionId]?.optionId)?.label ?? '–'}</span>
-                <button type="button" className="text-sm text-emerald-700 underline" onClick={() => { setIndex(k); setStep('pertanyaan'); }}>
-                  Ubah
-                </button>
-              </div>
-            </li>
-          );
-        })}
-      </ol>
-      {lastIndex < items.length - 1 && <p className="text-xs text-slate-500">{items.length - 1 - lastIndex} pertanyaan lain dilewati.</p>}
-      {submitState.error && (
-        <div className="rounded-lg bg-red-50 p-3 text-sm text-red-800" role="alert">
-          {submitState.error}{' '}
-          <a className="underline" href={href(`/peserta/klaim/${claim.id}`)} onClick={() => { saveDraft(draftKey, null); setPicked({}); setStep('ringkasan'); }}>
-            Muat ulang pertanyaan
-          </a>
+      <button type="button" className={cx(big, 'border border-slate-300 bg-white text-slate-700')} onClick={() => navigate('/peserta')}>
+        Nanti saja
+      </button>
+      {declineBox}
+    </div>
+  );
+}
+
+/** The one question the session is waiting for. Sending it saves the answer and moves the session on. */
+function QuestionStep({ session, pending, limit, slots, actor }: { session: ResponseSession; pending: PendingQuestion; limit: number; slots: { faskes: string; periode: string }; actor: ActorRef }) {
+  const { db, actions } = useApp();
+  const [choice, setChoice] = useState<string | null>(null);
+  const [send, sendState, clear] = useAction(actions.answer);
+  const v = getVersion(db, pending.questionId, pending.questionVersion);
+  return (
+    <>
+      <div className="mb-3 flex items-center justify-between text-xs text-slate-500">
+        <a href={href('/peserta')} className="flex items-center gap-1 text-sm text-slate-600">
+          <ArrowLeft className="h-4 w-4" aria-hidden /> Beranda
+        </a>
+        <span aria-live="polite">
+          Pertanyaan ke-{pending.iteration} (paling banyak {limit})
+        </span>
+      </div>
+      <div className="mb-4 h-1.5 rounded-full bg-slate-200">
+        <div className="h-1.5 rounded-full bg-emerald-600" style={{ width: `${(pending.iteration / Math.max(limit, 1)) * 100}%` }} />
+      </div>
+      <fieldset>
+        <legend className="text-lg font-semibold leading-snug text-slate-900">{renderText(v.text, slots)}</legend>
+        <div className="mt-4 space-y-2">
+          {v.options.map((o) => (
+            <label key={o.id} className={cx('flex cursor-pointer items-center gap-3 rounded-xl border-2 bg-white px-4 py-3 text-base', choice === o.id ? 'border-emerald-600 bg-emerald-50' : 'border-slate-200')}>
+              <input type="radio" name={`q-${pending.questionId}`} value={o.id} checked={choice === o.id} onChange={() => setChoice(o.id)} className="h-5 w-5 accent-emerald-700" />
+              {o.label}
+            </label>
+          ))}
+        </div>
+      </fieldset>
+      {sendState.error && (
+        <div className="mt-3 rounded-lg bg-red-50 p-3 text-sm text-red-800" role="alert">
+          {sendState.error} Jawaban ini belum tersimpan.{' '}
+          <button type="button" className="underline" onClick={clear}>
+            Coba lagi
+          </button>
         </div>
       )}
-      <button
-        type="button"
-        className={cx(big, 'bg-emerald-700 text-white')}
-        disabled={!complete || submitState.pending}
-        onClick={async () => {
-          const session = await submit(
-            {
-              assignmentId: assignment.id,
-              startedAt,
-              answers: shown.map((it) => ({ questionId: it.questionId, questionVersion: it.questionVersion, optionId: picked[it.questionId].optionId, answeredAt: picked[it.questionId].at })),
-            },
-            actor,
-          );
-          if (session) saveDraft(draftKey, null);
-        }}
-      >
-        {submitState.pending ? 'Mengirim…' : 'Kirim jawaban'}
-      </button>
-      <p className="text-center text-xs text-slate-500">Semua jawaban dikirim sekaligus dan tidak dapat diubah setelah terkirim.</p>
-    </div>
+      <div className="mt-auto pt-6">
+        <button
+          type="button"
+          className={cx(big, 'bg-emerald-700 text-white')}
+          disabled={!choice || sendState.pending}
+          onClick={() => choice && send({ sessionId: session.id, questionId: pending.questionId, questionVersion: pending.questionVersion, optionId: choice }, actor)}
+        >
+          {sendState.pending ? 'Mengirim…' : 'Kirim jawaban ini'}
+        </button>
+        <p className="mt-2 text-center text-xs text-slate-500">Jawaban yang sudah dikirim tidak dapat diubah.</p>
+      </div>
+    </>
   );
 }
 

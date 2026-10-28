@@ -1,6 +1,9 @@
-import { claimedNights, evidenceStatus, strengthOf, type EvidenceResult } from './evidence';
+import { evidenceStatus, type EvidenceResult } from './evidence';
+import { EMPTY_SCORES } from './verification';
 import type {
+  AiConfig,
   Answer,
+  AnswerEvaluation,
   AnswerOption,
   Assignment,
   Claim,
@@ -14,6 +17,7 @@ import type {
   QuestionVersion,
   ResponseSession,
   Strength,
+  VerificationScores,
 } from './types';
 
 // Read-side helpers shared by every role and by analytics. All of them derive from the stored
@@ -143,6 +147,16 @@ export function passedFaceCheck(db: Db, assignmentId: string): FristaCheck | und
   return fristaChecksFor(db, assignmentId).find((f) => f.result === 'COCOK');
 }
 
+/** The configuration with this version: the current one or one from the history. */
+export function configAt(db: Db, version: number): AiConfig {
+  return version === db.aiConfig.version ? db.aiConfig : (db.aiConfigHistory.find((c) => c.version === version) ?? db.aiConfig);
+}
+
+/** Most questions a session on this round can ask. */
+export function questionLimit(db: Db, assignment: Assignment, session?: ResponseSession): number {
+  return Math.min(assignment.items.length, configAt(db, session?.aiConfigVersion ?? db.aiConfig.version).maxQuestions);
+}
+
 /** Fills `{faskes}` and `{periode}` for the participant. */
 export function renderText(text: string, slots: { faskes: string; periode: string }): string {
   return text.replaceAll('{faskes}', slots.faskes).replaceAll('{periode}', slots.periode);
@@ -151,48 +165,71 @@ export function renderText(text: string, slots: { faskes: string; periode: strin
 export interface EvidenceRow {
   questionId: string;
   questionVersion: number;
+  /** Position in the verifier's round. */
+  order: number;
   entry: DictionaryEntry;
   version: QuestionVersion;
   answer: Answer | undefined;
   option: AnswerOption | undefined;
+  evaluation: AnswerEvaluation | null;
   strength: Strength | null;
+  /** Shown to the participant right now. */
+  pending: boolean;
+  /** Why the question was not asked, once the session made that final. */
+  notAsked: { kind: 'TIDAK_RELEVAN'; reason: string } | { kind: 'SESI_BERHENTI' } | null;
 }
 
 export interface ClaimEvidence {
   assignment: Assignment;
   session: ResponseSession | undefined;
+  /** Asked questions in the order they were asked, then the current one, then the rest of the round. */
   rows: EvidenceRow[];
+  /** Scores after the latest answer (all zero before the first). */
+  scores: VerificationScores;
+  /** Table 2 for the claim, once the session has ended with at least one answer. */
   result: EvidenceResult | null;
   denied: boolean;
 }
 
-/** Answers of the current round read against the claim (Table 1 per row, Table 2 for the claim). */
+/**
+ * The current round read against the claim. Every number comes from the evaluation stored with each
+ * answer when it was given; nothing is re-scored here.
+ */
 export function claimEvidence(db: Db, claim: Claim): ClaimEvidence | null {
   const assignment = currentAssignment(db, claim.id);
   if (!assignment) return null;
   const session = sessionFor(db, assignment.id);
-  const answers = session ? answersOf(db, session.id) : [];
-  const nights = claimedNights(claim);
+  const answers = session ? [...answersOf(db, session.id)].sort((a, b) => a.iteration - b.iteration) : [];
+  const ended = session?.status === 'SELESAI';
   const rows = [...assignment.items]
     .sort((a, b) => a.order - b.order)
     .map((item): EvidenceRow => {
       const question = getQuestion(db, item.questionId);
       const version = getVersion(db, item.questionId, item.questionVersion);
       const answer = answers.find((a) => a.questionId === item.questionId && a.questionVersion === item.questionVersion);
-      const option = answer?.optionId ? version.options.find((o) => o.id === answer.optionId) : undefined;
+      const option = answer ? version.options.find((o) => o.id === answer.optionId) : undefined;
+      const skip = session?.skipped.find((s) => s.questionId === item.questionId);
+      const pending = session?.pending?.questionId === item.questionId;
       return {
         questionId: item.questionId,
         questionVersion: item.questionVersion,
+        order: item.order,
         entry: getEntry(db, question.entryId),
         version,
         answer,
         option,
-        strength: option ? strengthOf(option, nights) : null,
+        evaluation: answer?.evaluation ?? null,
+        strength: answer?.evaluation.strength ?? null,
+        pending,
+        notAsked: answer || pending ? null : skip ? { kind: 'TIDAK_RELEVAN', reason: skip.reason } : ended ? { kind: 'SESI_BERHENTI' } : null,
       };
-    });
-  const denied = rows.some((r) => r.option?.denial);
-  const result = session
-    ? evidenceStatus({ denied, strengths: rows.map((r) => r.strength ?? 'NETRAL') })
-    : null;
-  return { assignment, session, rows, result, denied };
+    })
+    .sort((a, b) => rank(a) - rank(b) || (a.answer && b.answer ? a.answer.iteration - b.answer.iteration : a.order - b.order));
+  const denied = answers.some((a) => a.evaluation.denial);
+  const result = ended && answers.length ? evidenceStatus({ denied, strengths: answers.map((a) => a.evaluation.strength) }) : null;
+  return { assignment, session, rows, scores: answers.at(-1)?.scoresAfter ?? EMPTY_SCORES, result, denied };
+}
+
+function rank(row: EvidenceRow): number {
+  return row.answer ? 0 : row.pending ? 1 : 2;
 }

@@ -8,6 +8,7 @@ import {
   ORIGIN_LABEL,
   PARTICIPANT_STATUS_LABEL,
   PROVIDER_STATUS_LABEL,
+  SCORE_DISCLAIMER,
   STRENGTH_LABEL,
 } from '../domain/labels';
 import type { ClaimStatus, DecisionOutcome, MappingStatus, QuestionOrigin, Strength } from '../domain/types';
@@ -82,6 +83,16 @@ export function ConfidencePill({ value, below }: { value: number | null; below?:
     <Badge tone={below ? 'warn' : 'accent'} title="Keyakinan AI (simulasi): perkiraan peluang peserta memberi jawaban pasti. Bukan penilaian keabsahan klaim.">
       <Sparkles className="h-3 w-3" aria-hidden />
       Keyakinan AI <span className="tabular">{formatScore(value)}</span>
+    </Badge>
+  );
+}
+
+/** Claim-level inconsistency indication from the participant's answers (rule-based, not a fraud probability). */
+export function IndicationBadge({ value, threshold }: { value: number; threshold: number }) {
+  const tone: Tone = value >= threshold ? 'bad' : value > 0 ? 'warn' : 'neutral';
+  return (
+    <Badge tone={tone} title={SCORE_DISCLAIMER}>
+      Indikasi <span className="tabular">{formatScore(value)}</span>
     </Badge>
   );
 }

@@ -190,7 +190,7 @@ function EntryDetail({ entryId }: { entryId: string }) {
   if (!entry) return <Empty icon={BookOpen} title={`Entri ${entryId} tidak ditemukan`} />;
   const versionStats = (version: number) => {
     const published = db.assignments.filter((a) => a.items.some((i) => i.questionId === question?.id && i.questionVersion === version)).length;
-    const answers = db.answers.filter((a) => a.questionId === question?.id && a.questionVersion === version && a.status === 'DIJAWAB');
+    const answers = db.answers.filter((a) => a.questionId === question?.id && a.questionVersion === version);
     return { published, answered: answers.length };
   };
   return (

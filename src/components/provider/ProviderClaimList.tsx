@@ -5,7 +5,7 @@ import { PROVIDER_STATUS_LABEL } from '../../domain/labels';
 import type { Facility } from '../../domain/types';
 import { formatDate, formatDateTime, formatRupiah } from '../../lib/format';
 import { href } from '../../lib/router';
-import { ClaimStatusBadge } from '../status';
+import { ClaimStatusBadge, DecisionBadge } from '../status';
 import { Button, Card, Empty, PageHeader } from '../ui';
 import { cx, inputCls, td, th } from '../styles';
 
@@ -93,6 +93,11 @@ export function ProviderClaimList({ facility }: { facility: Facility }) {
                       <td className={cx(td, 'text-xs text-slate-600')}>{formatDateTime(c.submittedAt)}</td>
                       <td className={td}>
                         <ClaimStatusBadge status={c.status} view="provider" />
+                        {c.decision && (
+                          <div className="mt-1">
+                            <DecisionBadge outcome={c.decision.outcome} />
+                          </div>
+                        )}
                       </td>
                     </tr>
                   );
@@ -102,7 +107,7 @@ export function ProviderClaimList({ facility }: { facility: Facility }) {
           </div>
         )}
       </Card>
-      <p className="mt-2 text-xs text-slate-500">Status yang terlihat oleh faskes: {[...new Set(Object.values(PROVIDER_STATUS_LABEL))].join(' → ')}. Jawaban peserta tidak ditampilkan ke faskes.</p>
+      <p className="mt-2 text-xs text-slate-500">Status yang terlihat oleh faskes: {[...new Set(Object.values(PROVIDER_STATUS_LABEL))].join(' → ')}. Hasil keputusan ditampilkan; jawaban peserta tidak.</p>
     </>
   );
 }

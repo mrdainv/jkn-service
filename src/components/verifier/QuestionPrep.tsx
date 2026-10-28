@@ -1,12 +1,12 @@
-import { ArrowDown, ArrowUp, Lock, Pencil, Plus, Save, Send, Sparkles, Undo2 } from 'lucide-react';
+import { Lock, Pencil, Plus, Save, Send, Sparkles, Undo2 } from 'lucide-react';
 import { useState } from 'react';
 import { findProcedure } from '../../ai/reference';
 import { useAction, useApp } from '../../application/context';
-import { editIsChange } from '../../application/commands';
+import { editIsChange, isLocked, MAX_POOL_QUESTIONS } from '../../application/commands';
 import { checkQuestion, checksPass } from '../../domain/checks';
 import { claimedNights } from '../../domain/evidence';
 import { MATCH_TYPE_LABEL } from '../../domain/labels';
-import { currentAssignment, currentVersion, getEntry, getQuestion, getVersion, questionForEntry, renderText } from '../../domain/queries';
+import { currentAssignment, currentVersion, getEntry, getQuestion, getVersion, questionForEntry, renderText, sessionFor } from '../../domain/queries';
 import type { Claim, ClaimMapping, SelectionItem } from '../../domain/types';
 import { formatDateTime, formatPeriod, formatScore } from '../../lib/format';
 import { href } from '../../lib/router';
@@ -37,7 +37,8 @@ export function QuestionPrep({ claim }: { claim: Claim }) {
 
   const mappings = db.mappings.filter((m) => m.claimId === claim.id);
   const assignment = currentAssignment(db, claim.id);
-  const locked = claim.status === 'SELESAI' || (assignment !== undefined && assignment.status !== 'AKTIF');
+  const locked = isLocked(db, claim);
+  const started = assignment ? sessionFor(db, assignment.id) : undefined;
   const cfg = db.aiConfig;
   const nights = claimedNights(claim);
   const facility = db.facilities.find((f) => f.id === claim.facilityId)!;
@@ -51,12 +52,6 @@ export function QuestionPrep({ claim }: { claim: Claim }) {
   });
 
   const update = (questionId: string, patch: Partial<SelectionItem>) => setItems(items.map((i) => (i.questionId === questionId ? { ...i, ...patch } : i)));
-  const move = (index: number, delta: number) => {
-    const next = [...items];
-    const [it] = next.splice(index, 1);
-    next.splice(index + delta, 0, it);
-    setItems(next);
-  };
   const addable = db.dictionary.filter((e) => e.status === 'AKTIF' && questionForEntry(db, e.id) && !items.some((i) => getQuestion(db, i.questionId).entryId === e.id));
 
   const askFor = (m: ClaimMapping) => {
@@ -156,8 +151,8 @@ export function QuestionPrep({ claim }: { claim: Claim }) {
       )}
 
       <Card
-        title="Pertanyaan untuk peserta"
-        subtitle={`Urutan ini yang dilihat peserta. ${included.length} dipilih dari maksimal ${cfg.maxQuestions}. Usulan dengan keyakinan AI ≥ ${formatScore(cfg.autoSelectThreshold)} dipilih otomatis.`}
+        title="Pertanyaan yang disetujui untuk peserta"
+        subtitle={`${included.length} disetujui (maks. ${MAX_POOL_QUESTIONS}). Peserta ditanya satu per satu; AI memilih urutannya dari daftar ini dan berhenti paling lambat setelah ${cfg.maxQuestions} pertanyaan. Usulan dengan keyakinan AI ≥ ${formatScore(cfg.autoSelectThreshold)} dicentang otomatis.`}
         actions={
           assignment && (
             <Badge tone={assignment.status === 'AKTIF' ? 'info' : 'neutral'}>
@@ -168,12 +163,16 @@ export function QuestionPrep({ claim }: { claim: Claim }) {
       >
         {locked && (
           <Notice kind="info" className="mb-3" title="Pertanyaan terkunci">
-            {assignment?.status === 'DIJAWAB' ? 'Peserta sudah menjawab putaran ini; versi yang dijawab tidak dapat diubah.' : 'Klaim sudah diputuskan atau putaran ditutup.'}
+            {started?.status === 'BERLANGSUNG'
+              ? 'Peserta sedang menjawab putaran ini; daftar pertanyaan tidak dapat diubah sampai sesi berhenti.'
+              : assignment?.status === 'DIJAWAB'
+                ? 'Peserta sudah menjawab putaran ini; versi yang dijawab tidak dapat diubah.'
+                : 'Klaim sudah diputuskan atau putaran ditutup.'}
           </Notice>
         )}
         {!locked && assignment?.status === 'AKTIF' && (
           <Notice kind="warn" className="mb-3">
-            Pertanyaan sudah terbit dan menunggu jawaban. Menerbitkan ulang membuat putaran baru; peserta mendapat notifikasi pembaruan dan versi lama tidak dapat dijawab lagi.
+            Pertanyaan sudah terbit dan peserta belum memulai. Menerbitkan ulang membuat putaran baru; peserta mendapat notifikasi pembaruan dan versi lama tidak dapat dijawab lagi.
           </Notice>
         )}
         {items.length === 0 ? (
@@ -231,8 +230,6 @@ export function QuestionPrep({ claim }: { claim: Claim }) {
                     </div>
                     {!locked && (
                       <div className="flex items-center gap-1">
-                        <Button size="sm" variant="ghost" icon={ArrowUp} aria-label="Naikkan" disabled={index === 0} onClick={() => move(index, -1)} />
-                        <Button size="sm" variant="ghost" icon={ArrowDown} aria-label="Turunkan" disabled={index === items.length - 1} onClick={() => move(index, 1)} />
                         <Button size="sm" variant={isEditing ? 'primary' : 'secondary'} icon={Pencil} onClick={() => setEditing(isEditing ? null : item.questionId)}>
                           {isEditing ? 'Selesai' : 'Sunting'}
                         </Button>
@@ -284,7 +281,7 @@ export function QuestionPrep({ claim }: { claim: Claim }) {
         )}
         {published && !dirty && !publishState.error && (
           <Notice kind="success" className="mt-3" title="Pertanyaan diterbitkan">
-            Peserta sudah mendapat notifikasi. Versi pertanyaan terkunci pada putaran ini.
+            Peserta sudah mendapat notifikasi. Versi pertanyaan terkunci pada putaran ini; AI menanyakannya satu per satu.
           </Notice>
         )}
         {!locked && (
@@ -293,7 +290,7 @@ export function QuestionPrep({ claim }: { claim: Claim }) {
               variant="primary"
               icon={Send}
               pending={publishState.pending}
-              disabled={included.length === 0 || included.length > cfg.maxQuestions || invalidEdits.length > 0}
+              disabled={included.length === 0 || included.length > MAX_POOL_QUESTIONS || invalidEdits.length > 0}
               onClick={async () => {
                 const done = await publish(claim.id, items, VERIFIER_ACTOR);
                 if (done) {
@@ -309,7 +306,7 @@ export function QuestionPrep({ claim }: { claim: Claim }) {
               Simpan pilihan (belum terbit)
             </Button>
             {dirty && <span className="text-xs text-amber-800">Ada perubahan yang belum disimpan.</span>}
-            {included.length > cfg.maxQuestions && <span className="text-xs text-red-700">Melebihi batas {cfg.maxQuestions} pertanyaan.</span>}
+            {included.length > MAX_POOL_QUESTIONS && <span className="text-xs text-red-700">Melebihi batas {MAX_POOL_QUESTIONS} pertanyaan per putaran.</span>}
             {invalidEdits.length > 0 && <span className="text-xs text-red-700">{invalidEdits.length} suntingan belum lolos pemeriksaan.</span>}
           </div>
         )}

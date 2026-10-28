@@ -65,11 +65,11 @@ export const INA_CBG: Record<string, string> = {
 
 export const INITIAL_AI_CONFIG: AiConfig = {
   version: 1,
-  mode: 'SIMULASI_DETERMINISTIK',
   mappingThreshold: 0.5,
   autoSelectThreshold: 0.6,
   maxQuestions: 5,
   draftWarningThreshold: 0.5,
+  stopIndicationThreshold: 1,
   updatedAt: SEED_EPOCH,
   updatedBy: DICTIONARY_PANEL,
 };

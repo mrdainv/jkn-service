@@ -5,13 +5,11 @@ import type { DbStore } from '../data/store';
 import { createActions } from './actions';
 import { AppContext } from './context';
 
-
-
 interface Props {
   store: DbStore;
   ai?: QuestionAi;
   clock?: () => string;
-  /** How often to look for changes saved by other tabs or roles; 0 disables polling (tests). */
+  /** How often to look for changes saved by other tabs or roles and close expired rounds; 0 disables polling (tests). */
   pollMs?: number;
   children: ReactNode;
 }
@@ -38,14 +36,21 @@ export function AppProvider({ store, ai = simulatedAi, clock, pollMs = 2500, chi
 
   useEffect(() => {
     if (!pollMs) return;
-    const tick = () => document.visibilityState === 'visible' && void store.refresh();
+    // The system job runs on the same tick, so rounds close on time while the app is open, not only at load.
+    const tick = () => {
+      if (document.visibilityState !== 'visible') return;
+      void store
+        .refresh()
+        .then(() => actions.closeExpired())
+        .catch(() => undefined);
+    };
     const timer = window.setInterval(tick, pollMs);
     window.addEventListener('focus', tick);
     return () => {
       window.clearInterval(timer);
       window.removeEventListener('focus', tick);
     };
-  }, [store, pollMs]);
+  }, [store, actions, pollMs]);
 
   if (store.status === 'error' || !snapshot || store.incompatible) {
     return <StoreGate store={store} />;

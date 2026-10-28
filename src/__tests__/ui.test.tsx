@@ -47,24 +47,45 @@ describe('screens', () => {
     await waitFor(() => expect(window.location.hash).toBe(`#/peserta/klaim/${claim.id}`));
     fireEvent.click(await screen.findByRole('button', { name: 'Mulai' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Wajah cocok' }));
-    const total = db().assignments.find((a) => a.claimId === claim.id && a.status === 'AKTIF')!.items.length;
-    for (let i = 0; i < total; i += 1) {
-      await screen.findByText(`Pertanyaan ${i + 1} dari ${total}`);
+
+    // One question per screen: each answer is sent on its own and the next question follows.
+    const answered = () => screen.queryByText('Jawaban Anda sudah terkirim');
+    let shown = 0;
+    for (let i = 1; i <= 8 && !answered(); i += 1) {
+      await waitFor(() => expect(screen.queryByText(new RegExp(`^Pertanyaan ke-${i} `)) ?? answered()).toBeTruthy());
+      if (answered()) break;
+      shown = i;
+      expect(screen.getAllByRole('group')).toHaveLength(1);
       fireEvent.click(screen.getAllByRole('radio').find((r) => (r as HTMLInputElement).value === 'TIDAK_INGAT')!);
-      fireEvent.click(screen.getByRole('button', { name: i === total - 1 ? 'Periksa jawaban' : 'Lanjut' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Kirim jawaban ini' }));
     }
-    fireEvent.click(await screen.findByRole('button', { name: 'Kirim jawaban' }));
     await screen.findByText('Jawaban Anda sudah terkirim');
 
     const session = db().sessions.find((s) => s.claimId === claim.id)!;
-    expect(db().answers.filter((a) => a.sessionId === session.id)).toHaveLength(total);
+    expect(session).toMatchObject({ status: 'SELESAI' });
+    expect(db().answers.filter((a) => a.sessionId === session.id)).toHaveLength(shown);
     expect(db().claims.find((c) => c.id === claim.id)?.status).toBe('JAWABAN_DITERIMA');
     expect(checkIntegrity(db())).toEqual([]);
 
     // Back at the verifier: "Tidak ingat" everywhere reads as insufficient evidence, not a rebuttal.
     await go(`/verifikator/klaim/${claim.id}`);
-    const header = (await screen.findAllByText('Bukti tidak cukup'))[0];
-    expect(header).toBeTruthy();
+    expect((await screen.findAllByText('Bukti tidak cukup'))[0]).toBeTruthy();
+    expect(screen.getAllByText(/Indikasi/).length).toBeGreaterThan(0);
+
+    // The verifier decides; the decision and its basis are stored, and the facility sees the outcome.
+    fireEvent.click(screen.getByRole('tab', { name: 'Keputusan' }));
+    fireEvent.click(await screen.findByLabelText(/Tidak dapat disimpulkan/));
+    fireEvent.change(screen.getByLabelText('Alasan (wajib)'), { target: { value: 'Peserta tidak ingat semua butir yang ditanyakan.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Simpan keputusan' }));
+    await screen.findByText('Dasar evaluasi saat diputuskan');
+    expect(db().claims.find((c) => c.id === claim.id)?.decision).toMatchObject({ outcome: 'TIDAK_DAPAT_DISIMPULKAN', basis: { sessionId: session.id, evidenceStatus: 'BUKTI_TIDAK_CUKUP', answered: shown } });
+
+    window.localStorage.setItem('jkn-service/pref/facility', claim.facilityId);
+    cleanup();
+    render(<App store={store} pollMs={0} />);
+    await go(`/faskes/klaim/${claim.id}`);
+    expect(await screen.findByText('Hasil verifikasi: Tidak dapat disimpulkan')).toBeTruthy();
+    expect(screen.queryByText('Peserta tidak ingat semua butir yang ditanyakan.')).toBeNull();
   });
 
   it('validates the facility claim form before anything is saved', async () => {

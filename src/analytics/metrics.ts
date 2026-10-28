@@ -1,7 +1,7 @@
 import { findProcedure } from '../ai/reference';
-import { claimedNights, strengthOf, type EvidenceStatus } from '../domain/evidence';
+import { type EvidenceStatus } from '../domain/evidence';
 import { claimEvidence, getEntry, getQuestion, getVersion, sessionFor, answersOf } from '../domain/queries';
-import type { ClaimStatus, Db, DecisionOutcome, QuestionOrigin, Strength } from '../domain/types';
+import type { ClaimStatus, Db, DecisionOutcome, QuestionOrigin, StopReason, Strength } from '../domain/types';
 import { ageOn } from '../lib/format';
 import { brier, describe, ece, spearman, wilson, type Correlation, type Describe, type Proportion } from './stats';
 
@@ -26,7 +26,8 @@ export function bandOf(x: number): number {
   return BANDS.findIndex((b) => x >= b.lo && x < b.hi);
 }
 
-export type ItemOutcome = 'PASTI' | 'TIDAK_INGAT' | 'DILEWATI' | 'TANPA_RESPONS' | 'MENUNGGU';
+/** `TIDAK_DITANYAKAN`: in the round, but the adaptive session ended (or skipped it) before asking. */
+export type ItemOutcome = 'PASTI' | 'TIDAK_INGAT' | 'TIDAK_DITANYAKAN' | 'TANPA_RESPONS' | 'MENUNGGU';
 
 /** One published question on one claim (final rounds only) and what came of it. */
 export interface ItemFact {
@@ -57,16 +58,17 @@ export function itemFacts(db: Db): ItemFact[] {
     const participant = db.participants.find((p) => p.id === a.participantId)!;
     const session = sessionFor(db, a.id);
     const answers = session ? answersOf(db, session.id) : [];
-    const nights = claimedNights(claim);
     for (const item of a.items) {
       const question = getQuestion(db, item.questionId);
       const entry = getEntry(db, question.entryId);
       const version = getVersion(db, item.questionId, item.questionVersion);
       const suggestion = item.suggestionId ? db.suggestions.find((s) => s.id === item.suggestionId) : undefined;
       const answer = answers.find((x) => x.questionId === item.questionId);
-      const option = answer?.optionId ? version.options.find((o) => o.id === answer.optionId) : undefined;
+      const option = answer ? version.options.find((o) => o.id === answer.optionId) : undefined;
       let outcome: ItemOutcome;
-      if (session) outcome = !answer || answer.status === 'DILEWATI' ? 'DILEWATI' : option?.unsure ? 'TIDAK_INGAT' : 'PASTI';
+      if (answer) outcome = answer.evaluation.definite ? 'PASTI' : 'TIDAK_INGAT';
+      else if (session?.status === 'SELESAI') outcome = 'TIDAK_DITANYAKAN';
+      else if (session) outcome = 'MENUNGGU';
       else outcome = a.status === 'AKTIF' ? 'MENUNGGU' : 'TANPA_RESPONS';
       facts.push({
         claimId: claim.id,
@@ -79,11 +81,12 @@ export function itemFacts(db: Db): ItemFact[] {
         entryCode: entry.code,
         scope: entry.scope,
         observability: entry.observability,
-        aiConfidence: suggestion?.aiConfidence ?? null,
+        // The score the AI gave when it actually asked; the preparation score for questions never asked.
+        aiConfidence: answer?.pick.predictedDefinite ?? suggestion?.aiConfidence ?? null,
         outcome,
         optionId: option?.id ?? null,
         optionLabel: option?.label ?? null,
-        strength: option ? strengthOf(option, nights) : null,
+        strength: answer?.evaluation.strength ?? null,
         age: ageOn(participant.birthDate, claim.admissionDate),
         publishedAt: a.publishedAt,
       });
@@ -117,6 +120,8 @@ export interface QuestionRow {
   settled: number;
   answered: number;
   unanswered: Proportion;
+  /** Share of finished sessions that ended without asking this question. */
+  notAsked: Proportion;
   unsure: Proportion;
   contradiction: Proportion;
   options: { label: string; count: number; strength: Strength | null }[];
@@ -151,7 +156,7 @@ export function computeAnalytics(db: Db, now: string = new Date().toISOString())
   });
   const settledRounds = db.assignments.filter((a) => a.status === 'DIJAWAB' || a.status === 'DITUTUP');
   const responded = settledRounds.filter((a) => a.status === 'DIJAWAB');
-  const toResponse = responded.map((a) => hoursBetween(a.publishedAt, sessionFor(db, a.id)!.submittedAt));
+  const toResponse = responded.map((a) => hoursBetween(a.publishedAt, sessionFor(db, a.id)!.endedAt!));
   const weeks = new Map<string, { week: string; submitted: number; published: number; responded: number; settled: number }>();
   for (const c of claims) {
     const w = isoWeek(c.submittedAt);
@@ -263,7 +268,8 @@ export function computeAnalytics(db: Db, now: string = new Date().toISOString())
         published: fs.length,
         settled: st.length,
         answered: ans.length,
-        unanswered: wilson(st.filter((f) => f.outcome === 'TANPA_RESPONS' || f.outcome === 'DILEWATI').length, st.length),
+        unanswered: wilson(st.filter((f) => f.outcome === 'TANPA_RESPONS').length, st.length),
+        notAsked: wilson(st.filter((f) => f.outcome === 'TIDAK_DITANYAKAN').length, st.filter((f) => f.outcome !== 'TANPA_RESPONS').length),
         unsure: wilson(ans.filter((f) => f.outcome === 'TIDAK_INGAT').length, ans.length),
         contradiction: wilson(ans.filter((f) => f.strength === 'BERTENTANGAN').length, ans.length),
         options: [...optionCounts.values()].sort((a, b) => b.count - a.count),
@@ -307,7 +313,7 @@ export function computeAnalytics(db: Db, now: string = new Date().toISOString())
     const ans = answersOf(db, s.id);
     const stayAnswer = ans.find((a) => topicOf(a.questionId) === 'KEBERADAAN');
     const nightsAnswer = ans.find((a) => topicOf(a.questionId) === 'LAMA_RAWAT');
-    if (stayAnswer?.optionId && nightsAnswer?.optionId) {
+    if (stayAnswer && nightsAnswer) {
       const stayOption = getVersion(db, stayAnswer.questionId, stayAnswer.questionVersion).options.find((o) => o.id === stayAnswer.optionId);
       const nightsOption = getVersion(db, nightsAnswer.questionId, nightsAnswer.questionVersion).options.find((o) => o.id === nightsAnswer.optionId);
       const stay = stayOption?.mapping.kind === 'TETAP' && stayOption.mapping.strength === 'BERTENTANGAN' && !stayOption.denial;
@@ -317,7 +323,8 @@ export function computeAnalytics(db: Db, now: string = new Date().toISOString())
   }
   const quality = {
     nightsInconsistent: wilson(nightsInconsistent, nightsChecked),
-    skipped: db.answers.filter((a) => a.status === 'DILEWATI').length,
+    notAsked: facts.filter((f) => f.outcome === 'TIDAK_DITANYAKAN').length,
+    skippedIrrelevant: db.sessions.reduce((n, s) => n + s.skipped.length, 0),
     fristaChecks: db.fristaChecks.length,
     fristaMismatch: db.fristaChecks.filter((f) => f.result === 'TIDAK_COCOK').length,
     fristaUnavailable: db.fristaChecks.filter((f) => f.result === 'LAYANAN_TIDAK_TERSEDIA').length,
@@ -334,8 +341,8 @@ export function computeAnalytics(db: Db, now: string = new Date().toISOString())
   const outcomeTable: { evidence: EvidenceStatus | 'TANPA_JAWABAN'; decision: DecisionOutcome | 'BELUM'; count: number }[] = [];
   for (const c of claims) {
     if (c.status === 'DIAJUKAN' || c.status === 'MENUNGGU_PESERTA') continue;
-    const ev = claimEvidence(db, c);
-    const evidence = ev?.result?.status ?? 'TANPA_JAWABAN';
+    // A decided claim is read with the basis stored on the decision: what the verifier actually saw.
+    const evidence = c.decision ? c.decision.basis.evidenceStatus : (claimEvidence(db, c)?.result?.status ?? 'TANPA_JAWABAN');
     const decision = c.decision?.outcome ?? 'BELUM';
     const row = outcomeTable.find((r) => r.evidence === evidence && r.decision === decision);
     if (row) row.count += 1;
@@ -390,7 +397,28 @@ export function computeAnalytics(db: Db, now: string = new Date().toISOString())
     });
   }
 
+  // ── Adaptive sessions: how many questions it took and why they stopped ──
+  const ended = db.sessions.filter((x) => x.status === 'SELESAI');
+  const finalScores = ended.flatMap((x) => {
+    const last = answersOf(db, x.id).reduce<number>((m, a) => Math.max(m, a.iteration), 0);
+    const answer = answersOf(db, x.id).find((a) => a.iteration === last);
+    return answer ? [answer.scoresAfter] : [];
+  });
+  const stopReasons = ended.reduce<Partial<Record<StopReason, number>>>((m, x) => (x.stopReason ? { ...m, [x.stopReason]: (m[x.stopReason] ?? 0) + 1 } : m), {});
+  const adaptive = {
+    sessions: ended.length,
+    open: db.sessions.length - ended.length,
+    asked: describe(ended.map((x) => answersOf(db, x.id).length)),
+    roundSize: describe(ended.map((x) => db.assignments.find((a) => a.id === x.assignmentId)!.items.length)),
+    stopReasons,
+    indication: describe(finalScores.map((x) => x.indication)),
+    support: describe(finalScores.map((x) => x.support)),
+    reachedStop: finalScores.filter((x) => x.indication >= 1).length,
+    skippedIrrelevant: db.sessions.reduce((n, x) => n + x.skipped.length, 0),
+  };
+
   return {
+    adaptive,
     totals: { claims: claims.length, suggestions: db.suggestions.length, assignments: db.assignments.length, sessions: db.sessions.length, answers: db.answers.length, items: facts.length },
     operations: {
       byStatus,

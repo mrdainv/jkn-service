@@ -1,9 +1,14 @@
-import type { DraftResponse, RankRequest, RankedQuestion } from '../ai/service';
+import type { ClaimContext, DraftResponse, HistoryItem, NextQuestionRequest, NextQuestionResponse, PoolItem, RankRequest, RankedQuestion } from '../ai/service';
 import { checkQuestion } from '../domain/checks';
 import { claimedNights } from '../domain/evidence';
+import { STOP_REASON_LABEL } from '../domain/labels';
 import { bestMatch, episodeEntry, episodeTopicsFor, mappingStatus } from '../domain/mapping';
+import { combineScores, EMPTY_SCORES, evaluateAnswer, stopAfterAnswer } from '../domain/verification';
 import {
+  answersOf,
   assignmentsOf,
+  claimEvidence,
+  configAt,
   currentAssignment,
   currentVersion,
   failedFaceChecks,
@@ -22,8 +27,11 @@ import type {
   ActorRef,
   AiConfig,
   AiDraft,
+  AiKind,
+  Answer,
   AnswerOption,
   Assignment,
+  AssignmentItem,
   CareClass,
   CareType,
   Claim,
@@ -31,6 +39,7 @@ import type {
   ClaimStatus,
   CodedItem,
   Db,
+  DecisionBasis,
   DecisionOutcome,
   DictionaryEntry,
   DraftProposal,
@@ -44,6 +53,7 @@ import type {
   QuestionSelection,
   ResponseSession,
   SelectionItem,
+  StopReason,
   Suggestion,
 } from '../domain/types';
 import { formatPeriod, wibDate } from '../lib/format';
@@ -71,6 +81,26 @@ export class CommandError extends Error {
 export const RESPONSE_WINDOW_DAYS = 28;
 /** Counted face-check failures before the participant is routed to a phone call. */
 export const MAX_FACE_FAILURES = 2;
+/** Most questions a verifier can approve for one round; the AI asks at most `AiConfig.maxQuestions` of them. */
+export const MAX_POOL_QUESTIONS = 10;
+
+/** The AI behind a command, called synchronously: the actions layer resolves the real (async) AI first. */
+export interface AiPort {
+  rank(request: RankRequest): RankedQuestion[];
+  next(request: NextQuestionRequest): NextQuestionResponse;
+}
+
+export interface AiModel {
+  id: string;
+  version: string;
+  kind: AiKind;
+}
+
+function aiActor(model: AiModel): ActorRef {
+  return { role: 'AI', id: model.id, name: model.kind === 'SIMULASI_DETERMINISTIK' ? 'AI (simulasi)' : 'AI' };
+}
+
+const inUnit = (x: number) => Number.isFinite(x) && x >= 0 && x <= 1;
 
 export const SYSTEM_ACTOR: ActorRef = { role: 'SISTEM', id: 'SYS', name: 'Sistem' };
 
@@ -145,6 +175,14 @@ export function validateClaimInput(db: Db, input: ClaimInput, today: string): Re
 
   if (!ICD10.test(input.diagnosis.code.trim().toUpperCase())) e.diagnosis = 'Kode ICD-10 tidak valid (contoh: A91 atau J18.9).';
   else if (!input.diagnosis.name.trim()) e.diagnosis = 'Isi nama diagnosis.';
+  input.secondaryDiagnoses.forEach((d, i) => {
+    const code = d.code.trim().toUpperCase();
+    if (!code && !d.name.trim()) return;
+    if (!ICD10.test(code)) e[`secondaryDiagnoses.${i}`] = 'Kode ICD-10 diagnosis sekunder tidak valid.';
+    else if (!d.name.trim()) e[`secondaryDiagnoses.${i}`] = 'Isi nama diagnosis sekunder.';
+    else if (code === input.diagnosis.code.trim().toUpperCase()) e[`secondaryDiagnoses.${i}`] = 'Sama dengan diagnosis utama.';
+  });
+  if (participant && !e.admissionDate && input.admissionDate < participant.birthDate) e.admissionDate = 'Tanggal masuk sebelum tanggal lahir peserta.';
 
   if (input.procedures.length > 10) e.procedures = 'Maksimal 10 baris tindakan.';
   const seen = new Set<string>();
@@ -217,21 +255,37 @@ export function candidatesFor(db: Db, claimId: string): Candidate[] {
   return out;
 }
 
-export function rankRequestFor(claim: Claim, candidates: readonly Candidate[]): RankRequest {
+/** The claim as the AI sees it: built from the stored claim only, without the participant's identity. */
+export function claimContextFor(claim: Claim): ClaimContext {
   return {
     claimKey: claim.id,
     careType: claim.careType,
     claimedNights: claimedNights(claim),
+    diagnosis: { ...claim.diagnosis },
+    procedures: claim.procedures.map((p) => ({ lineId: p.lineId, code: p.code, name: p.name, quantity: p.quantity })),
+  };
+}
+
+function entryFacts(entry: DictionaryEntry) {
+  return { id: entry.id, scope: entry.scope, topic: entry.topic, category: entry.category, observability: entry.observability };
+}
+
+function lineOf(mapping: ClaimMapping | undefined): string | null {
+  return mapping?.target.kind === 'PROSEDUR' ? mapping.target.lineId : null;
+}
+
+export function rankRequestFor(claim: Claim, candidates: readonly Candidate[]): RankRequest {
+  return {
+    claim: claimContextFor(claim),
     candidates: candidates.map((c) => ({
       questionId: c.question.id,
       version: currentVersion(c.question).version,
-      entry: { id: c.entry.id, scope: c.entry.scope, topic: c.entry.topic, category: c.entry.category, observability: c.entry.observability },
+      entry: entryFacts(c.entry),
+      lineId: lineOf(c.mapping),
       relevance: c.mapping.relevance,
     })),
   };
 }
-
-export type Ranker = (request: RankRequest) => RankedQuestion[];
 
 function episodeOrder(entry: DictionaryEntry): number {
   return entry.topic === 'KEBERADAAN' ? 0 : entry.topic === 'LAMA_RAWAT' ? 1 : 2;
@@ -242,11 +296,13 @@ function episodeOrder(entry: DictionaryEntry): number {
  * claim's working selection. Episode questions come first; the rest follow AI confidence. Only mapped,
  * high-enough suggestions within the question limit are preselected.
  */
-function addSuggestions(db: Db, claim: Claim, candidates: Candidate[], ranked: RankedQuestion[], ctx: Ctx, model: { id: string; version: string }) {
+function addSuggestions(db: Db, claim: Claim, candidates: Candidate[], ranked: RankedQuestion[], ctx: Ctx, model: AiModel, source: Suggestion['source']) {
   const cfg = db.aiConfig;
   const scored = candidates.map((c) => {
     const r = ranked.find((x) => x.questionId === c.question.id);
     if (!r) throw new CommandError('AI_STALE', 'Hasil AI tidak memuat semua kandidat; ulangi.');
+    if (r.version !== currentVersion(c.question).version) throw new CommandError('AI_STALE', 'Versi pertanyaan berubah saat AI bekerja; ulangi.');
+    if (!inUnit(r.confidence)) throw new CommandError('AI_INVALID', 'Skor AI di luar rentang 0–1; tidak disimpan.');
     return { ...c, confidence: r.confidence, version: r.version };
   });
   scored.sort((a, b) => episodeOrder(a.entry) - episodeOrder(b.entry) || b.confidence - a.confidence || a.question.id.localeCompare(b.question.id));
@@ -266,10 +322,10 @@ function addSuggestions(db: Db, claim: Claim, candidates: Candidate[], ranked: R
       questionId: c.question.id,
       questionVersion: c.version,
       mappingId: c.mapping.id,
-      source: 'PEMETAAN_KAMUS',
+      source,
       aiConfidence: c.confidence,
       confidenceEvent: 'JAWABAN_PASTI',
-      model,
+      model: { id: model.id, version: model.version },
       aiConfigVersion: cfg.version,
       rank: existingRank + i + 1,
       preselected,
@@ -292,7 +348,7 @@ function ensureSelection(db: Db, claimId: string, ctx: Ctx): QuestionSelection {
   return selection;
 }
 
-export function submitClaim(db: Db, input: ClaimInput, ctx: Ctx, rank: Ranker, model: { id: string; version: string }): Claim {
+export function submitClaim(db: Db, input: ClaimInput, ctx: Ctx, ai: AiPort, model: AiModel): Claim {
   const errors = validateClaimInput(db, input, wibDate(ctx.now));
   if (Object.keys(errors).length) throw new CommandError('INVALID_CLAIM', 'Data klaim belum lengkap atau tidak valid.', errors);
   const id = nextId(db, 'KLM');
@@ -307,7 +363,7 @@ export function submitClaim(db: Db, input: ClaimInput, ctx: Ctx, rank: Ranker, m
     admissionDate: input.admissionDate,
     dischargeDate: input.dischargeDate,
     diagnosis: { code: input.diagnosis.code.trim().toUpperCase(), name: input.diagnosis.name.trim() },
-    secondaryDiagnoses: input.secondaryDiagnoses.filter((d) => d.code.trim()).map((d) => ({ code: d.code.trim().toUpperCase(), name: d.name.trim() })),
+    secondaryDiagnoses: input.secondaryDiagnoses.filter((d) => d.code.trim() || d.name.trim()).map((d) => ({ code: d.code.trim().toUpperCase(), name: d.name.trim() })),
     procedures: input.procedures.map((p, i) => ({ lineId: `L${i + 1}`, code: p.code.trim(), name: p.name.trim(), quantity: p.quantity })),
     inaCbg: { code: input.inaCbg.code.trim().toUpperCase(), tariff: input.inaCbg.tariff },
     hospitalCharge: input.hospitalCharge,
@@ -326,15 +382,16 @@ export function submitClaim(db: Db, input: ClaimInput, ctx: Ctx, rank: Ranker, m
   const mapped = mappings.filter((m) => m.status === 'TERPETAKAN').length;
   audit(db, sysCtx, 'PEMETAAN_KAMUS', 'Claim', id, id, `${mapped} dari ${mappings.length} atribut terpetakan ke kamus`);
   const candidates = candidatesFor(db, id);
-  addSuggestions(db, claim, candidates, rank(rankRequestFor(claim, candidates)), { now: ctx.now, actor: { role: 'AI', id: model.id, name: 'AI (simulasi)' } }, model);
+  addSuggestions(db, claim, candidates, ai.rank(rankRequestFor(claim, candidates)), { now: ctx.now, actor: aiActor(model) }, model, 'PEMETAAN_KAMUS');
   return claim;
 }
 
 // ── Verifier: question preparation and publication ──────────────────────────
 
-function isLocked(db: Db, claim: Claim): boolean {
+/** Questions are fixed once the participant has started (FRISTA matched) or the round is over. */
+export function isLocked(db: Db, claim: Claim): boolean {
   const current = currentAssignment(db, claim.id);
-  return claim.status === 'SELESAI' || (current !== undefined && current.status !== 'AKTIF');
+  return claim.status === 'SELESAI' || (current !== undefined && (current.status !== 'AKTIF' || sessionFor(db, current.id) !== undefined));
 }
 
 function sanitizeOptions(options: readonly AnswerOption[]): AnswerOption[] {
@@ -388,8 +445,8 @@ export function publishQuestions(db: Db, claimId: string, items: SelectionItem[]
   }
   const included = items.filter((i) => i.included);
   if (included.length === 0) throw new CommandError('EMPTY', 'Pilih setidaknya satu pertanyaan.');
-  if (included.length > db.aiConfig.maxQuestions) {
-    throw new CommandError('TOO_MANY', `Maksimal ${db.aiConfig.maxQuestions} pertanyaan per klaim (lihat Konfigurasi AI).`);
+  if (included.length > MAX_POOL_QUESTIONS) {
+    throw new CommandError('TOO_MANY', `Maksimal ${MAX_POOL_QUESTIONS} pertanyaan disetujui per putaran; AI menanyakan paling banyak ${db.aiConfig.maxQuestions}.`);
   }
   const ids = new Set(included.map((i) => i.questionId));
   if (ids.size !== included.length) throw new CommandError('DUPLICATE', 'Pertanyaan yang sama dipilih dua kali.');
@@ -451,7 +508,8 @@ export function publishQuestions(db: Db, claimId: string, items: SelectionItem[]
   selection.updatedAt = ctx.now;
   selection.updatedBy = ctx.actor;
 
-  setStatus(db, claim, 'MENUNGGU_PESERTA', ctx, round === 1 ? `${finalItems.length} pertanyaan diterbitkan ke peserta.` : `Pertanyaan diperbarui (putaran ${round}).`);
+  const asked = Math.min(finalItems.length, db.aiConfig.maxQuestions);
+  setStatus(db, claim, 'MENUNGGU_PESERTA', ctx, round === 1 ? `${finalItems.length} pertanyaan disetujui; peserta ditanya satu per satu, hingga ${asked}.` : `Pertanyaan diperbarui (putaran ${round}).`);
   const facility = db.facilities.find((f) => f.id === claim.facilityId);
   notify(db, ctx, {
     participantId: claim.participantId,
@@ -459,7 +517,7 @@ export function publishQuestions(db: Db, claimId: string, items: SelectionItem[]
     assignmentId: assignment.id,
     kind: round === 1 ? 'PERTANYAAN_BARU' : 'PERTANYAAN_DIPERBARUI',
     title: round === 1 ? 'Konfirmasi layanan kesehatan Anda' : 'Pertanyaan konfirmasi diperbarui',
-    body: `BPJS Kesehatan meminta Anda mengonfirmasi layanan di ${facility?.name ?? 'rumah sakit'} (${formatPeriod(claim.admissionDate)}). ${finalItems.length} pertanyaan singkat, sukarela.`,
+    body: `BPJS Kesehatan meminta Anda mengonfirmasi layanan di ${facility?.name ?? 'rumah sakit'} (${formatPeriod(claim.admissionDate)}). Hingga ${asked} pertanyaan singkat, satu per satu, sukarela.`,
   });
   audit(db, ctx, 'PERTANYAAN_DITERBITKAN', 'Assignment', assignment.id, claimId, `Putaran ${round}: ${finalItems.map((f) => `${f.item.questionId} v${f.version}`).join(', ')}`);
   return assignment;
@@ -553,7 +611,7 @@ export function claimsAffectedByCode(db: Db, code: string): Claim[] {
  * question (v1), re-maps claims that bill the same code, and suggests the new question on claims that
  * are still being prepared. Nothing is published to a participant here.
  */
-export function approveDraft(db: Db, draftId: string, ctx: Ctx, rank: Ranker, model: { id: string; version: string }) {
+export function approveDraft(db: Db, draftId: string, ctx: Ctx, ai: AiPort, model: AiModel) {
   const draft = openDraft(db, draftId);
   const final = draft.edited ?? draft.proposal;
   const failed = checkQuestion(final.text, final.options, final.avoidTerms).filter((r) => !r.ok);
@@ -611,7 +669,7 @@ export function approveDraft(db: Db, draftId: string, ctx: Ctx, rank: Ranker, mo
     if (isLocked(db, claim) || !['DIAJUKAN', 'MENUNGGU_PESERTA'].includes(claim.status)) continue;
     const candidates = candidatesFor(db, claim.id).filter((c) => c.question.id === question.id);
     if (!candidates.length) continue;
-    addSuggestions(db, claim, candidates, rank(rankRequestFor(claim, candidates)), sysCtx, model);
+    addSuggestions(db, claim, candidates, ai.rank(rankRequestFor(claim, candidates)), sysCtx, model, 'DRAF_AI');
     if (claim.id === draft.claimId) {
       const item = ensureSelection(db, claim.id, ctx).items.find((i) => i.questionId === question.id);
       if (item) {
@@ -625,11 +683,15 @@ export function approveDraft(db: Db, draftId: string, ctx: Ctx, rank: Ranker, mo
 
 // ── Verifier: configuration and decision ────────────────────────────────────
 
-export function updateAiConfig(db: Db, patch: Partial<Pick<AiConfig, 'mappingThreshold' | 'autoSelectThreshold' | 'maxQuestions' | 'draftWarningThreshold'>>, ctx: Ctx): AiConfig {
+export type AiConfigPatch = Partial<Pick<AiConfig, 'mappingThreshold' | 'autoSelectThreshold' | 'maxQuestions' | 'draftWarningThreshold' | 'stopIndicationThreshold'>>;
+
+export function updateAiConfig(db: Db, patch: AiConfigPatch, ctx: Ctx): AiConfig {
   const next: AiConfig = { ...db.aiConfig, ...patch, version: db.aiConfig.version + 1, updatedAt: ctx.now, updatedBy: ctx.actor };
-  const inUnit = (x: number) => Number.isFinite(x) && x >= 0 && x <= 1;
   if (!inUnit(next.mappingThreshold) || !inUnit(next.autoSelectThreshold) || !inUnit(next.draftWarningThreshold)) {
     throw new CommandError('INVALID_CONFIG', 'Ambang harus di antara 0 dan 1.');
+  }
+  if (!Number.isFinite(next.stopIndicationThreshold) || next.stopIndicationThreshold < 0.5 || next.stopIndicationThreshold > 1) {
+    throw new CommandError('INVALID_CONFIG', 'Ambang berhenti indikasi harus di antara 0,5 dan 1.');
   }
   if (!Number.isInteger(next.maxQuestions) || next.maxQuestions < 1 || next.maxQuestions > 8) {
     throw new CommandError('INVALID_CONFIG', 'Jumlah pertanyaan maksimal 1–8.');
@@ -641,6 +703,20 @@ export function updateAiConfig(db: Db, patch: Partial<Pick<AiConfig, 'mappingThr
   return next;
 }
 
+/** The evaluation the verifier is looking at, copied onto the decision. */
+export function decisionBasis(db: Db, claim: Claim): DecisionBasis {
+  const ev = claimEvidence(db, claim);
+  const answered = ev?.scores.answered ?? 0;
+  return {
+    sessionId: ev?.session?.id ?? null,
+    evidenceStatus: ev?.result?.status ?? 'TANPA_JAWABAN',
+    indication: answered ? ev!.scores.indication : null,
+    support: answered ? ev!.scores.support : null,
+    stopReason: ev?.session?.stopReason ?? null,
+    answered,
+  };
+}
+
 export function decideClaim(db: Db, claimId: string, outcome: DecisionOutcome, reason: string, ctx: Ctx): Claim {
   const claim = getClaim(db, claimId);
   if (claim.status === 'SELESAI') throw new CommandError('DECIDED', 'Klaim ini sudah diputuskan.');
@@ -648,7 +724,7 @@ export function decideClaim(db: Db, claimId: string, outcome: DecisionOutcome, r
     throw new CommandError('NOT_READY', 'Keputusan dibuat setelah ada jawaban atau proses peserta berakhir.');
   }
   if (reason.trim().length < 10) throw new CommandError('REASON_REQUIRED', 'Tulis alasan keputusan (minimal 10 karakter).', { reason: 'Wajib diisi.' });
-  claim.decision = { outcome, reason: reason.trim(), decidedAt: ctx.now, decidedBy: ctx.actor };
+  claim.decision = { outcome, reason: reason.trim(), decidedAt: ctx.now, decidedBy: ctx.actor, basis: decisionBasis(db, claim) };
   setStatus(db, claim, 'SELESAI', ctx, `Keputusan: ${outcome}`);
   audit(db, ctx, 'KEPUTUSAN_DIBUAT', 'Claim', claimId, claimId, outcome);
   return claim;
@@ -671,8 +747,11 @@ export function markNotificationRead(db: Db, notificationId: string, ctx: Ctx) {
   if (!n.readAt) n.readAt = ctx.now;
 }
 
-/** FRISTA result. A match unlocks the questions; two mismatches or no camera route the case to a phone call. */
-export function recordFrista(db: Db, assignmentId: string, result: FristaResult, ctx: Ctx): FristaCheck {
+/**
+ * FRISTA result. A match opens the answering session and asks the first question; two mismatches or no
+ * camera route the case to a phone call.
+ */
+export function recordFrista(db: Db, assignmentId: string, result: FristaResult, ctx: Ctx, ai: AiPort, model: AiModel): FristaCheck {
   const { assignment, claim } = activeAssignmentFor(db, assignmentId, ctx.actor.id);
   if (passedFaceCheck(db, assignmentId)) throw new CommandError('ALREADY_VERIFIED', 'Wajah sudah cocok untuk sesi ini.');
   const failedBefore = failedFaceChecks(db, assignmentId);
@@ -683,57 +762,16 @@ export function recordFrista(db: Db, assignmentId: string, result: FristaResult,
   const check: FristaCheck = { id: nextId(db, 'FRS'), participantId: ctx.actor.id, claimId: claim.id, assignmentId, result, failedAttempts, at: ctx.now, method: 'SIMULASI' };
   db.fristaChecks.push(check);
   audit(db, ctx, 'FRISTA', 'FristaCheck', check.id, claim.id, result);
-  if (result === 'TANPA_KAMERA' || failedAttempts >= MAX_FACE_FAILURES) {
+  if (result === 'COCOK') {
+    openSession(db, assignment, claim, check, ctx, ai, model);
+  } else if (result === 'TANPA_KAMERA' || failedAttempts >= MAX_FACE_FAILURES) {
     assignment.status = 'DITUTUP';
     setStatus(db, claim, 'PERLU_KONTAK', ctx, result === 'TANPA_KAMERA' ? 'Peserta tidak punya kamera; dialihkan ke telepon.' : 'Cek wajah gagal dua kali; dialihkan ke telepon.');
   }
   return check;
 }
 
-export function declineQuestions(db: Db, assignmentId: string, ctx: Ctx) {
-  const { assignment, claim } = activeAssignmentFor(db, assignmentId, ctx.actor.id);
-  assignment.status = 'DITUTUP';
-  setStatus(db, claim, 'DITOLAK_PESERTA', ctx, 'Peserta memilih tidak menjawab. Hak layanan tidak berubah.');
-  audit(db, ctx, 'PESERTA_MENOLAK', 'Assignment', assignmentId, claim.id, 'Peserta tidak bersedia menjawab');
-}
-
-export interface AnswerInput {
-  questionId: string;
-  questionVersion: number;
-  optionId: string;
-  answeredAt: Iso;
-}
-
-/**
- * Records all answers of one round in a single write. Rejects a second submission, a superseded round,
- * a missing face match, and answers that do not belong to the exact published versions. After a denial
- * the remaining questions are stored as skipped.
- */
-export function submitResponses(db: Db, args: { assignmentId: string; answers: AnswerInput[]; startedAt: Iso }, ctx: Ctx): ResponseSession {
-  const { assignment, claim } = activeAssignmentFor(db, args.assignmentId, ctx.actor.id);
-  if (sessionFor(db, assignment.id)) throw new CommandError('ALREADY_SUBMITTED', 'Jawaban untuk pertanyaan ini sudah terkirim.');
-  const face = passedFaceCheck(db, assignment.id);
-  if (!face) throw new CommandError('FRISTA_REQUIRED', 'Verifikasi wajah FRISTA diperlukan sebelum mengirim jawaban.');
-
-  const items = [...assignment.items].sort((a, b) => a.order - b.order);
-  const byQuestion = new Map(args.answers.map((a) => [a.questionId, a]));
-  if (byQuestion.size !== args.answers.length) throw new CommandError('DUPLICATE_ANSWER', 'Satu pertanyaan dijawab dua kali.');
-  let denied = false;
-  const resolved = items.map((item) => {
-    const version = getVersion(db, item.questionId, item.questionVersion);
-    const given = byQuestion.get(item.questionId);
-    if (denied) return { item, option: null as AnswerOption | null, answeredAt: given?.answeredAt ?? ctx.now };
-    if (!given) throw new CommandError('INCOMPLETE', 'Semua pertanyaan perlu dijawab (pilih "Tidak ingat" bila tidak ingat).');
-    if (given.questionVersion !== item.questionVersion) throw new CommandError('VERSION_MISMATCH', 'Versi pertanyaan berubah. Muat ulang pertanyaan.');
-    const option = version.options.find((o) => o.id === given.optionId);
-    if (!option) throw new CommandError('BAD_OPTION', 'Pilihan jawaban tidak dikenal.');
-    if (option.denial) denied = true;
-    return { item, option, answeredAt: given.answeredAt };
-  });
-  for (const a of args.answers) {
-    if (!items.some((i) => i.questionId === a.questionId)) throw new CommandError('BAD_QUESTION', 'Jawaban untuk pertanyaan yang tidak diterbitkan.');
-  }
-
+function openSession(db: Db, assignment: Assignment, claim: Claim, face: FristaCheck, ctx: Ctx, ai: AiPort, model: AiModel) {
   const session: ResponseSession = {
     id: nextId(db, 'RSP'),
     claimId: claim.id,
@@ -741,39 +779,197 @@ export function submitResponses(db: Db, args: { assignmentId: string; answers: A
     participantId: assignment.participantId,
     fristaCheckId: face.id,
     channel: 'MOBILE_JKN',
-    startedAt: args.startedAt,
-    submittedAt: ctx.now,
-    status: 'TERKIRIM',
+    startedAt: ctx.now,
+    status: 'BERLANGSUNG',
+    pending: null,
+    skipped: [],
+    stopReason: null,
+    endedAt: null,
+    aiConfigVersion: db.aiConfig.version,
   };
   db.sessions.push(session);
-  for (const r of resolved) {
-    db.answers.push({
-      id: nextId(db, 'ANS', 7),
-      sessionId: session.id,
+  audit(db, ctx, 'SESI_DIMULAI', 'ResponseSession', session.id, claim.id, `Putaran ${assignment.round}: ${assignment.items.length} pertanyaan disetujui, hingga ${db.aiConfig.maxQuestions} ditanyakan`);
+  advance(db, session, assignment, claim, ctx, ai, model);
+}
+
+function poolItem(db: Db, claim: Claim, item: AssignmentItem): PoolItem {
+  const question = getQuestion(db, item.questionId);
+  const entry = getEntry(db, question.entryId);
+  const mapping = db.mappings.find((m) => m.claimId === claim.id && m.entryId === entry.id);
+  const suggestion = item.suggestionId ? db.suggestions.find((s) => s.id === item.suggestionId) : undefined;
+  return {
+    questionId: item.questionId,
+    version: item.questionVersion,
+    entry: entryFacts(entry),
+    lineId: lineOf(mapping),
+    relevance: mapping?.relevance ?? 0,
+    order: item.order,
+    priorConfidence: suggestion?.aiConfidence ?? null,
+  };
+}
+
+function historyItem(db: Db, claim: Claim, answer: Answer): HistoryItem {
+  const entry = getEntry(db, getQuestion(db, answer.questionId).entryId);
+  const mapping = db.mappings.find((m) => m.claimId === claim.id && m.entryId === entry.id);
+  return {
+    questionId: answer.questionId,
+    version: answer.questionVersion,
+    topic: entry.topic,
+    lineId: lineOf(mapping),
+    strength: answer.evaluation.strength,
+    definite: answer.evaluation.definite,
+    denial: answer.evaluation.denial,
+  };
+}
+
+/**
+ * One step of the adaptive loop, after the latest answer has been evaluated: stop if a stop rule holds,
+ * otherwise ask the AI for the next question of the round and show exactly that one.
+ */
+function advance(db: Db, session: ResponseSession, assignment: Assignment, claim: Claim, ctx: Ctx, ai: AiPort, model: AiModel) {
+  // The session keeps the configuration it started under, even if the configuration changes meanwhile.
+  const cfg = configAt(db, session.aiConfigVersion);
+  const answers = [...answersOf(db, session.id)].sort((a, b) => a.iteration - b.iteration);
+  const scores = answers.at(-1)?.scoresAfter ?? EMPTY_SCORES;
+  const stop = stopAfterAnswer(scores, cfg);
+  if (stop) return finishSession(db, session, assignment, claim, stop, ctx);
+  const done = new Set([...answers.map((a) => a.questionId), ...session.skipped.map((s) => s.questionId)]);
+  const pool = [...assignment.items].filter((i) => !done.has(i.questionId)).sort((a, b) => a.order - b.order);
+  if (pool.length === 0) return finishSession(db, session, assignment, claim, 'PERTANYAAN_HABIS', ctx);
+
+  const response = ai.next({
+    claim: claimContextFor(claim),
+    sessionKey: session.id,
+    pool: pool.map((i) => poolItem(db, claim, i)),
+    history: answers.map((a) => historyItem(db, claim, a)),
+    scores,
+    remaining: cfg.maxQuestions - answers.length,
+  });
+  const aiCtx = { now: ctx.now, actor: aiActor(model) };
+  for (const s of response.skipped) {
+    const item = pool.find((p) => p.questionId === s.questionId);
+    if (!item) throw new CommandError('AI_INVALID', 'Hasil AI menyebut pertanyaan di luar putaran; tidak disimpan.');
+    session.skipped.push({ questionId: item.questionId, questionVersion: item.questionVersion, reason: s.reason, at: ctx.now });
+    audit(db, aiCtx, 'PERTANYAAN_DILEWATI_AI', 'ResponseSession', session.id, claim.id, `${item.questionId}: ${s.reason}`);
+  }
+  const next = response.next;
+  if (!next) return finishSession(db, session, assignment, claim, 'PERTANYAAN_HABIS', ctx);
+  const chosen = pool.find((p) => p.questionId === next.questionId && p.questionVersion === next.version);
+  if (!chosen || response.skipped.some((s) => s.questionId === next.questionId)) {
+    throw new CommandError('AI_INVALID', 'AI memilih pertanyaan yang tidak ada di putaran ini; tidak disimpan.');
+  }
+  if (!inUnit(next.predictedDefinite)) throw new CommandError('AI_INVALID', 'Skor AI di luar rentang 0–1; tidak disimpan.');
+  session.pending = {
+    questionId: chosen.questionId,
+    questionVersion: chosen.questionVersion,
+    iteration: answers.length + 1,
+    askedAt: ctx.now,
+    pick: { model: { ...model }, predictedDefinite: next.predictedDefinite, rationale: next.rationale },
+  };
+  audit(db, aiCtx, 'PERTANYAAN_DIPILIH_AI', 'ResponseSession', session.id, claim.id, `#${answers.length + 1}: ${chosen.questionId} v${chosen.questionVersion}`);
+}
+
+/**
+ * Ends a session. With at least one answer the round counts as answered and the verifier can review it;
+ * without any, the claim gets `empty.status` (declined, expired, or nothing left to ask).
+ */
+function finishSession(
+  db: Db,
+  session: ResponseSession,
+  assignment: Assignment,
+  claim: Claim,
+  reason: StopReason,
+  ctx: Ctx,
+  empty: { status: ClaimStatus; note: string } = { status: 'TIDAK_DIJAWAB', note: 'Tidak ada pertanyaan yang relevan untuk ditanyakan.' },
+) {
+  const answers = answersOf(db, session.id);
+  session.status = 'SELESAI';
+  session.pending = null;
+  session.stopReason = reason;
+  session.endedAt = ctx.now;
+  if (answers.length === 0) {
+    assignment.status = 'DITUTUP';
+    setStatus(db, claim, empty.status, ctx, empty.note);
+  } else {
+    assignment.status = 'DIJAWAB';
+    setStatus(db, claim, 'JAWABAN_DITERIMA', ctx, `${answers.length} jawaban diterima; berhenti karena ${STOP_REASON_LABEL[reason].toLowerCase()}.`);
+    for (const n of db.notifications.filter((x) => x.assignmentId === assignment.id && !x.readAt)) n.readAt = ctx.now;
+    // The receipt is shown on screen right away, so it starts out read.
+    const receipt = notify(db, ctx, {
+      participantId: assignment.participantId,
       claimId: claim.id,
       assignmentId: assignment.id,
-      questionId: r.item.questionId,
-      questionVersion: r.item.questionVersion,
-      optionId: r.option?.id ?? null,
-      status: r.option ? 'DIJAWAB' : 'DILEWATI',
-      answeredAt: r.answeredAt,
+      kind: 'JAWABAN_DITERIMA',
+      title: 'Jawaban Anda sudah diterima',
+      body: `Nomor tanda terima ${session.id}. Terima kasih. Jawaban ini tidak mengubah hak layanan Anda.`,
     });
+    receipt.readAt = ctx.now;
   }
-  assignment.status = 'DIJAWAB';
-  setStatus(db, claim, 'JAWABAN_DITERIMA', ctx, `${resolved.filter((r) => r.option).length} jawaban diterima${denied ? ' (penyangkalan; sisa pertanyaan dilewati)' : ''}.`);
-  for (const n of db.notifications.filter((x) => x.assignmentId === assignment.id && !x.readAt)) n.readAt = ctx.now;
-  // The receipt is shown on screen right away, so it starts out read.
-  const receipt = notify(db, ctx, {
-    participantId: assignment.participantId,
+  const last = answers.reduce<Answer | undefined>((a, b) => (!a || b.iteration > a.iteration ? b : a), undefined);
+  audit(db, ctx, 'SESI_SELESAI', 'ResponseSession', session.id, claim.id, `${STOP_REASON_LABEL[reason]}; ${answers.length} jawaban, indikasi ${last?.scoresAfter.indication ?? 0}, dukungan ${last?.scoresAfter.support ?? 0}`);
+}
+
+/** Participant chooses not to answer (before starting) or to stop (after some answers). */
+export function declineQuestions(db: Db, assignmentId: string, ctx: Ctx) {
+  const { assignment, claim } = activeAssignmentFor(db, assignmentId, ctx.actor.id);
+  const session = sessionFor(db, assignment.id);
+  const note = 'Peserta memilih tidak menjawab. Hak layanan tidak berubah.';
+  if (session) {
+    finishSession(db, session, assignment, claim, 'DIHENTIKAN_PESERTA', ctx, { status: 'DITOLAK_PESERTA', note });
+  } else {
+    assignment.status = 'DITUTUP';
+    setStatus(db, claim, 'DITOLAK_PESERTA', ctx, note);
+  }
+  audit(db, ctx, 'PESERTA_MENOLAK', 'Assignment', assignmentId, claim.id, session ? `Berhenti setelah ${answersOf(db, session.id).length} jawaban` : 'Peserta tidak bersedia menjawab');
+}
+
+export interface AnswerInput {
+  sessionId: string;
+  questionId: string;
+  questionVersion: number;
+  optionId: string;
+}
+
+/**
+ * Records the answer to the question on screen, evaluates it (rule-based, Table 1 plus weights), updates
+ * the claim scores, then either stops or has the AI pick the next question, all in one write. Rejects
+ * answers to anything but the current question of the participant's own open session.
+ */
+export function answerQuestion(db: Db, input: AnswerInput, ctx: Ctx, ai: AiPort, model: AiModel): Answer {
+  const session = db.sessions.find((s) => s.id === input.sessionId);
+  if (!session || session.participantId !== ctx.actor.id) throw new CommandError('NOT_FOUND', 'Sesi jawaban tidak ditemukan untuk peserta ini.');
+  const { assignment, claim } = activeAssignmentFor(db, session.assignmentId, ctx.actor.id);
+  const pending = session.pending;
+  if (session.status !== 'BERLANGSUNG' || !pending) throw new CommandError('SESSION_ENDED', 'Sesi menjawab sudah selesai.');
+  if (pending.questionId !== input.questionId || pending.questionVersion !== input.questionVersion) {
+    throw new CommandError('STALE_QUESTION', 'Pertanyaan sudah berganti. Muat ulang pertanyaan.');
+  }
+  const version = getVersion(db, input.questionId, input.questionVersion);
+  const option = version.options.find((o) => o.id === input.optionId);
+  if (!option) throw new CommandError('BAD_OPTION', 'Pilihan jawaban tidak dikenal.');
+  const entry = getEntry(db, getQuestion(db, input.questionId).entryId);
+  const evaluation = evaluateAnswer(option, entry, claimedNights(claim));
+  const previous = answersOf(db, session.id).map((a) => a.evaluation);
+  const answer: Answer = {
+    id: nextId(db, 'ANS', 7),
+    sessionId: session.id,
     claimId: claim.id,
     assignmentId: assignment.id,
-    kind: 'JAWABAN_DITERIMA',
-    title: 'Jawaban Anda sudah diterima',
-    body: `Nomor tanda terima ${session.id}. Terima kasih. Jawaban ini tidak mengubah hak layanan Anda.`,
-  });
-  receipt.readAt = ctx.now;
-  audit(db, ctx, 'JAWABAN_DIKIRIM', 'ResponseSession', session.id, claim.id, `${resolved.length} butir, ${resolved.filter((r) => !r.option).length} dilewati`);
-  return session;
+    questionId: input.questionId,
+    questionVersion: input.questionVersion,
+    optionId: option.id,
+    iteration: pending.iteration,
+    askedAt: pending.askedAt,
+    answeredAt: ctx.now,
+    pick: pending.pick,
+    evaluation,
+    scoresAfter: combineScores([...previous, evaluation]),
+  };
+  db.answers.push(answer);
+  session.pending = null;
+  audit(db, ctx, 'JAWABAN_DICATAT', 'Answer', answer.id, claim.id, `#${answer.iteration} ${answer.questionId} v${answer.questionVersion}: ${evaluation.strength}${evaluation.definite ? '' : ' (tidak ingat)'}; indikasi ${answer.scoresAfter.indication}`);
+  advance(db, session, assignment, claim, ctx, ai, model);
+  return answer;
 }
 
 // ── System ──────────────────────────────────────────────────────────────────
@@ -783,7 +979,10 @@ export function hasExpired(db: Db, now: Iso): boolean {
   return db.assignments.some((a) => a.status === 'AKTIF' && addDaysIso(a.publishedAt, RESPONSE_WINDOW_DAYS) <= now);
 }
 
-/** Closes rounds left unanswered past the response window. Idempotent. */
+/**
+ * Closes rounds past the response window. An open session keeps the answers given so far and ends with
+ * `BATAS_WAKTU`; a round nobody started is closed unanswered. Idempotent.
+ */
 export function closeExpired(db: Db, ctx: Ctx): number {
   let closed = 0;
   for (const a of db.assignments) {
@@ -791,8 +990,14 @@ export function closeExpired(db: Db, ctx: Ctx): number {
     if (addDaysIso(a.publishedAt, RESPONSE_WINDOW_DAYS) > ctx.now) continue;
     const claim = findClaim(db, a.claimId);
     if (!claim || claim.status !== 'MENUNGGU_PESERTA') continue;
-    a.status = 'DITUTUP';
-    setStatus(db, claim, 'TIDAK_DIJAWAB', ctx, `Tidak ada jawaban dalam ${RESPONSE_WINDOW_DAYS} hari.`);
+    const note = `Tidak ada jawaban dalam ${RESPONSE_WINDOW_DAYS} hari.`;
+    const session = sessionFor(db, a.id);
+    if (session) {
+      finishSession(db, session, a, claim, 'BATAS_WAKTU', ctx, { status: 'TIDAK_DIJAWAB', note });
+    } else {
+      a.status = 'DITUTUP';
+      setStatus(db, claim, 'TIDAK_DIJAWAB', ctx, note);
+    }
     audit(db, ctx, 'PUTARAN_DITUTUP', 'Assignment', a.id, claim.id, 'Batas waktu menjawab terlewati');
     closed += 1;
   }

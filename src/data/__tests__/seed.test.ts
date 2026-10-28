@@ -20,6 +20,20 @@ describe('simulation seed', () => {
     for (const s of ['DIAJUKAN', 'MENUNGGU_PESERTA', 'JAWABAN_DITERIMA', 'SELESAI', 'TIDAK_DIJAWAB']) expect(statuses).toContain(s);
     expect(db.claims).toHaveLength(104);
     expect(db.sessions.length).toBeGreaterThan(60);
+    const stops = new Set(db.sessions.map((s) => s.stopReason));
+    for (const r of ['PERTANYAAN_HABIS', 'INDIKASI_MAKSIMUM']) expect(stops).toContain(r);
+    expect(db.sessions.some((s) => s.skipped.length > 0)).toBe(true);
+  });
+
+  it('runs the historical sessions through the same adaptive commands', () => {
+    for (const s of db.sessions) {
+      const answers = db.answers.filter((a) => a.sessionId === s.id).sort((a, b) => a.iteration - b.iteration);
+      expect(answers.length).toBeLessThanOrEqual(db.aiConfig.maxQuestions);
+      // Only the last answer can have triggered a stop on the indication.
+      expect(answers.slice(0, -1).every((a) => a.scoresAfter.indication < 1)).toBe(true);
+      if (s.stopReason === 'INDIKASI_MAKSIMUM') expect(answers.at(-1)!.evaluation.denial).toBe(true);
+    }
+    expect(db.claims.filter((c) => c.decision).every((c) => c.decision!.basis !== undefined)).toBe(true);
   });
 
   it('keeps every dictionary question within the wording rules', () => {

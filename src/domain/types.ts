@@ -84,11 +84,25 @@ export type ClaimStatus =
 
 export type DecisionOutcome = 'SESUAI' | 'PERLU_TINDAK_LANJUT' | 'TIDAK_DAPAT_DISIMPULKAN';
 
+/**
+ * What the verifier saw when deciding, copied at decision time so the decision stays tied to the
+ * evaluation it was based on even if the claim is read again later.
+ */
+export interface DecisionBasis {
+  sessionId: string | null;
+  evidenceStatus: 'PERLU_DIPERIKSA' | 'BUKTI_TIDAK_CUKUP' | 'KONSISTEN' | 'TANPA_JAWABAN';
+  indication: number | null;
+  support: number | null;
+  stopReason: StopReason | null;
+  answered: number;
+}
+
 export interface VerifierDecision {
   outcome: DecisionOutcome;
   reason: string;
   decidedAt: Iso;
   decidedBy: ActorRef;
+  basis: DecisionBasis;
 }
 
 export interface Claim {
@@ -255,6 +269,9 @@ export interface QuestionSelection {
 
 // ── AI drafts ───────────────────────────────────────────────────────────────
 
+/** How an AI result was produced. Only the deterministic simulation exists today. */
+export type AiKind = 'SIMULASI_DETERMINISTIK' | 'MODEL_EKSTERNAL';
+
 export interface DraftProposal {
   text: string;
   options: AnswerOption[];
@@ -272,7 +289,7 @@ export interface AiDraft {
   variant: number;
   generatedAt: Iso;
   requestedBy: ActorRef;
-  generator: { id: string; version: string; kind: 'SIMULASI_DETERMINISTIK' };
+  generator: { id: string; version: string; kind: AiKind };
   context: {
     /** Claim attributes the generator used. */
     claimAttributes: string[];
@@ -301,7 +318,10 @@ export interface AssignmentItem {
   suggestionId: string | null;
 }
 
-/** A published set of questions for one claim. A new round supersedes an unanswered earlier one. */
+/**
+ * A published round: the verifier-approved questions (exact versions) the AI may ask, one at a time,
+ * up to `AiConfig.maxQuestions`. A new round supersedes an earlier one that nobody has started answering.
+ */
 export interface Assignment {
   id: string;
   claimId: string;
@@ -343,6 +363,40 @@ export interface FristaCheck {
   method: 'SIMULASI';
 }
 
+/** Why the system stopped asking. Recorded once, when the session ends. */
+export type StopReason =
+  /** The inconsistency indication reached the configured stop threshold (1,00 = participant denied ever being there). */
+  | 'INDIKASI_MAKSIMUM'
+  /** As many questions were asked as the configuration allows. */
+  | 'BATAS_PERTANYAAN'
+  /** No relevant question was left in the round. */
+  | 'PERTANYAAN_HABIS'
+  /** The participant chose to stop. */
+  | 'DIHENTIKAN_PESERTA'
+  /** The response window closed while the session was open. */
+  | 'BATAS_WAKTU';
+
+/** Why the AI picked a question: the model, its predicted chance of a definite answer, and its reasoning. */
+export interface AiPick {
+  model: { id: string; version: string; kind: AiKind };
+  /** 0–1: predicted chance the participant gives a definite answer (not "Tidak ingat"). Never claim validity. */
+  predictedDefinite: number;
+  rationale: string;
+}
+
+/** The question currently shown to the participant; exactly one at a time. */
+export interface PendingQuestion {
+  questionId: string;
+  questionVersion: number;
+  iteration: number;
+  askedAt: Iso;
+  pick: AiPick;
+}
+
+/**
+ * One adaptive answering session: opened by a FRISTA match, then one question at a time until a stop
+ * rule holds. Scores are not kept here; they live on each answer (`scoresAfter`), so they cannot drift.
+ */
 export interface ResponseSession {
   id: string;
   claimId: string;
@@ -351,8 +405,43 @@ export interface ResponseSession {
   fristaCheckId: string;
   channel: 'MOBILE_JKN';
   startedAt: Iso;
-  submittedAt: Iso;
-  status: 'TERKIRIM';
+  status: 'BERLANGSUNG' | 'SELESAI';
+  pending: PendingQuestion | null;
+  /** Round questions the AI judged irrelevant after earlier answers; they are never asked. */
+  skipped: { questionId: string; questionVersion: number; reason: string; at: Iso }[];
+  stopReason: StopReason | null;
+  endedAt: Iso | null;
+  /** AI configuration (stop threshold, question limit) the session ran under. */
+  aiConfigVersion: number;
+}
+
+/**
+ * Rule-based reading of one answer (not AI). `reliability` is how much this single answer can count:
+ * the entry's observability when the answer is definite, 0 for "Tidak ingat".
+ */
+export interface AnswerEvaluation {
+  rules: string;
+  strength: Strength;
+  definite: boolean;
+  denial: boolean;
+  reliability: number;
+  /** Contribution to the inconsistency indication (0–1; 1 for a denial). */
+  indicationWeight: number;
+  /** Contribution to the support score (0–1). */
+  supportWeight: number;
+  explanation: string;
+}
+
+/**
+ * Claim-level scores after an answer. `indication` combines contradicting answers (noisy-OR of their
+ * weights) and reaches 1 only through a denial; `support` does the same for supporting answers. Both are
+ * rule-based simulation scores, not validated fraud probabilities.
+ */
+export interface VerificationScores {
+  indication: number;
+  support: number;
+  answered: number;
+  definite: number;
 }
 
 export interface Answer {
@@ -362,23 +451,29 @@ export interface Answer {
   assignmentId: string;
   questionId: string;
   questionVersion: number;
-  /** Null when the question was skipped. */
-  optionId: string | null;
-  status: 'DIJAWAB' | 'DILEWATI';
+  optionId: string;
+  /** 1 for the first question of the session, then 2, 3, … */
+  iteration: number;
+  askedAt: Iso;
+  /** Command time when the answer was recorded (not the device clock). */
   answeredAt: Iso;
+  pick: AiPick;
+  evaluation: AnswerEvaluation;
+  scoresAfter: VerificationScores;
 }
 
 // ── Configuration and audit ─────────────────────────────────────────────────
 
 export interface AiConfig {
   version: number;
-  mode: 'SIMULASI_DETERMINISTIK';
   /** Minimum relevance for a dictionary match to count as mapped. */
   mappingThreshold: number;
   /** Suggestions at or above this AI confidence are preselected for the verifier. */
   autoSelectThreshold: number;
-  /** Maximum questions published per claim. */
+  /** Maximum questions asked per claim in one session (and preselected for the verifier). */
   maxQuestions: number;
+  /** The session stops once the inconsistency indication reaches this (1 = only a denial stops it). */
+  stopIndicationThreshold: number;
   /** AI drafts below this confidence carry a warning. */
   draftWarningThreshold: number;
   updatedAt: Iso;
@@ -396,7 +491,7 @@ export interface AuditEntry {
   summary: string;
 }
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export interface Db {
   schemaVersion: typeof SCHEMA_VERSION;

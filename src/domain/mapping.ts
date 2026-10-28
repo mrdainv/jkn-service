@@ -43,7 +43,9 @@ export function scoreEntry(line: Pick<ClaimProcedure, 'code' | 'name'>, entry: D
   let best: MatchResult = { entryId: null, matchType: 'TIDAK_ADA', relevance: 0 };
   if (lineCat === entryCat && lineSub[0] !== undefined && lineSub[0] === entrySub[0]) {
     best = { entryId: entry.id, matchType: 'KODE_INDUK', relevance: 0.7 };
-  } else if (lineCat === entryCat) {
+  } else if (lineCat === entryCat && lexical > 0) {
+    // A shared category alone ("99" holds infusions and transfusions alike) is not evidence the entry
+    // fits; it counts only when the names also share a word.
     best = { entryId: entry.id, matchType: 'KODE_INDUK', relevance: 0.45 };
   }
   const byName = lexical > 0 ? Math.min(0.8, 0.3 + 0.6 * lexical) : 0;

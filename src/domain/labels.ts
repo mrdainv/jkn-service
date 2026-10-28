@@ -8,6 +8,7 @@ import type {
   MatchType,
   QuestionOrigin,
   Segment,
+  StopReason,
   Strength,
 } from './types';
 import type { EvidenceStatus } from './evidence';
@@ -42,7 +43,7 @@ export const CLAIM_STATUS_LABEL: Record<ClaimStatus, string> = {
   SELESAI: 'Selesai diputuskan',
 };
 
-/** What the facility sees: the workflow stage only, never the participant's answers (no result is sent to the hospital). */
+/** What the facility sees: the workflow stage (and, once decided, the outcome), never the participant's answers. */
 export const PROVIDER_STATUS_LABEL: Record<ClaimStatus, string> = {
   DIAJUKAN: 'Diajukan',
   MENUNGGU_PESERTA: 'Dalam verifikasi',
@@ -116,3 +117,16 @@ export const PARTICIPANT_STATUS_LABEL: Record<ClaimStatus, string> = {
   TIDAK_DIJAWAB: 'Batas waktu menjawab terlewati',
   SELESAI: 'Selesai',
 };
+
+/** Why the adaptive questioning stopped. */
+export const STOP_REASON_LABEL: Record<StopReason, string> = {
+  INDIKASI_MAKSIMUM: 'Indikasi ketidaksesuaian mencapai ambang berhenti',
+  BATAS_PERTANYAAN: 'Batas jumlah pertanyaan tercapai',
+  PERTANYAAN_HABIS: 'Tidak ada pertanyaan relevan yang tersisa',
+  DIHENTIKAN_PESERTA: 'Peserta berhenti menjawab',
+  BATAS_WAKTU: 'Batas waktu menjawab terlewati',
+};
+
+/** One sentence on what the two claim-level scores are, shown wherever they appear. */
+export const SCORE_DISCLAIMER =
+  'Skor indikasi dan dukungan dihitung dengan aturan dari jawaban peserta (simulasi). Skor ini mengurutkan pekerjaan verifikator; bukan probabilitas fraud yang tervalidasi dan bukan keputusan.';

@@ -64,7 +64,7 @@ export function ClaimForm({ facility, actor }: { facility: Facility; actor: Acto
     admissionDate: admission,
     dischargeDate: careType === 'RAWAT_JALAN' ? admission : discharge,
     diagnosis: { code: dx.code, name: dx.name },
-    secondaryDiagnoses: dx2.code ? [dx2] : [],
+    secondaryDiagnoses: dx2.code || dx2.name ? [dx2] : [],
     procedures: rows.filter((r) => r.code || r.name).map((r) => ({ code: r.code, name: r.name, quantity: Number(r.quantity) })),
     inaCbg: { code: cbgCode, tariff: Number(tariff) },
     hospitalCharge: Number(charge),
@@ -240,14 +240,19 @@ export function ClaimForm({ facility, actor }: { facility: Facility; actor: Acto
             )}
             <div className="grid grid-cols-3 gap-2">
               <Field label="Sekunder (ops.)" htmlFor="dx2-code">
-                <input id="dx2-code" className={cx(inputCls, 'font-mono')} value={dx2.code} onChange={(e) => setDx2({ ...dx2, code: e.target.value.toUpperCase() })} />
+                <input id="dx2-code" className={cx(inputCls, 'font-mono')} value={dx2.code} onChange={(e) => setDx2({ ...dx2, code: e.target.value.toUpperCase() })} aria-invalid={!!errors['secondaryDiagnoses.0']} />
               </Field>
               <div className="col-span-2">
                 <Field label="Nama" htmlFor="dx2-name">
-                  <input id="dx2-name" className={inputCls} value={dx2.name} onChange={(e) => setDx2({ ...dx2, name: e.target.value })} />
+                  <input id="dx2-name" className={inputCls} value={dx2.name} onChange={(e) => setDx2({ ...dx2, name: e.target.value })} aria-invalid={!!errors['secondaryDiagnoses.0']} />
                 </Field>
               </div>
             </div>
+            {errors['secondaryDiagnoses.0'] && (
+              <p className="text-xs text-red-700" role="alert">
+                {errors['secondaryDiagnoses.0']}
+              </p>
+            )}
           </div>
         </Card>
 

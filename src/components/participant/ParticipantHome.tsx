@@ -1,7 +1,7 @@
 import { ChevronRight, ClipboardList, ShieldCheck } from 'lucide-react';
 import { useDb } from '../../application/context';
 import { CARE_TYPE_LABEL } from '../../domain/labels';
-import { currentAssignment } from '../../domain/queries';
+import { answersOf, currentAssignment, questionLimit, sessionFor } from '../../domain/queries';
 import type { Participant } from '../../domain/types';
 import { formatPeriod } from '../../lib/format';
 import { href } from '../../lib/router';
@@ -26,6 +26,8 @@ export function ParticipantHome({ participant }: { participant: Participant }) {
           <ul className="space-y-2">
             {pending.map((c) => {
               const a = currentAssignment(db, c.id)!;
+              const session = sessionFor(db, a.id);
+              const done = session ? answersOf(db, session.id).length : 0;
               return (
                 <li key={c.id}>
                   <a href={href(`/peserta/klaim/${c.id}`)} className="flex items-center gap-3 rounded-xl border-2 border-emerald-600 bg-white p-3 shadow-sm">
@@ -33,7 +35,8 @@ export function ParticipantHome({ participant }: { participant: Participant }) {
                     <span className="flex-1">
                       <span className="block text-sm font-semibold text-slate-900">{facilityName(c.facilityId)}</span>
                       <span className="block text-xs text-slate-600">
-                        {CARE_TYPE_LABEL[c.careType]}, {formatPeriod(c.admissionDate)} · {a.items.length} pertanyaan singkat
+                        {CARE_TYPE_LABEL[c.careType]}, {formatPeriod(c.admissionDate)} ·{' '}
+                        {session ? `${done} terjawab, lanjutkan` : `hingga ${questionLimit(db, a)} pertanyaan singkat`}
                       </span>
                     </span>
                     <ChevronRight className="h-5 w-5 text-slate-400" aria-hidden />

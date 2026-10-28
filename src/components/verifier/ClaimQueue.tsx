@@ -1,12 +1,12 @@
 import { Inbox } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { useDb } from '../../application/context';
-import { claimEvidence } from '../../domain/queries';
+import { claimEvidence, configAt } from '../../domain/queries';
 import type { Claim, ClaimStatus } from '../../domain/types';
 import { formatDate, formatDateTime } from '../../lib/format';
 import { href, navigate } from '../../lib/router';
 import { usePref } from '../../lib/viewer';
-import { ClaimStatusBadge, EvidenceBadge } from '../status';
+import { ClaimStatusBadge, EvidenceBadge, IndicationBadge } from '../status';
 import { Badge, Card, Empty, PageHeader } from '../ui';
 import { cx, inputCls, td, th } from '../styles';
 
@@ -38,10 +38,13 @@ export function ClaimQueue() {
       })
       .filter(({ c, participant }) => !needle || c.id.toLowerCase().includes(needle) || c.sepNumber.toLowerCase().includes(needle) || participant.name.toLowerCase().includes(needle) || c.diagnosis.code.toLowerCase().includes(needle))
       .sort((a, b) => {
-        // Denials first, then the oldest waiting claim (first in, first out).
+        // Denials first, then the highest inconsistency indication, then the oldest waiting claim.
         const pa = a.evidence?.result?.priority ? 0 : 1;
         const pb = b.evidence?.result?.priority ? 0 : 1;
         if (pa !== pb && group !== 'selesai') return pa - pb;
+        const ia = a.evidence?.result ? a.evidence.scores.indication : 0;
+        const ib = b.evidence?.result ? b.evidence.scores.indication : 0;
+        if (ia !== ib && group !== 'selesai') return ib - ia;
         return group === 'selesai' || group === 'semua' ? b.c.submittedAt.localeCompare(a.c.submittedAt) : a.c.submittedAt.localeCompare(b.c.submittedAt);
       });
   }, [db, active, q, group]);
@@ -87,7 +90,7 @@ export function ClaimQueue() {
                   <th className={th}>Faskes</th>
                   <th className={th}>Diagnosis</th>
                   <th className={th}>Tindakan terpetakan</th>
-                  <th className={th}>Bukti peserta</th>
+                  <th className={th}>Hasil sesi peserta</th>
                   <th className={th}>Status</th>
                 </tr>
               </thead>
@@ -105,6 +108,8 @@ export function ClaimQueue() {
 }
 
 function ClaimRow({ c, name, facility, mapped, lines, evidence }: { c: Claim; name: string; facility: string; mapped: number; lines: number; evidence: ReturnType<typeof claimEvidence> }) {
+  const db = useDb();
+  const threshold = (version: number) => configAt(db, version).stopIndicationThreshold;
   return (
     <tr className="cursor-pointer hover:bg-slate-50" onClick={() => navigate(`/verifikator/klaim/${c.id}`)}>
       <td className={td}>
@@ -132,7 +137,18 @@ function ClaimRow({ c, name, facility, mapped, lines, evidence }: { c: Claim; na
           </Badge>
         )}
       </td>
-      <td className={td}>{evidence?.result ? <EvidenceBadge status={evidence.result.status} priority={evidence.result.priority} /> : <span className="text-xs text-slate-400">–</span>}</td>
+      <td className={td}>
+        {evidence?.result && evidence.session ? (
+          <span className="flex flex-wrap gap-1">
+            <EvidenceBadge status={evidence.result.status} priority={evidence.result.priority} />
+            <IndicationBadge value={evidence.scores.indication} threshold={threshold(evidence.session.aiConfigVersion)} />
+          </span>
+        ) : evidence?.session?.status === 'BERLANGSUNG' ? (
+          <span className="text-xs text-sky-700">sedang menjawab ({evidence.scores.answered})</span>
+        ) : (
+          <span className="text-xs text-slate-400">–</span>
+        )}
+      </td>
       <td className={td}>
         <ClaimStatusBadge status={c.status} />
         <div className="mt-0.5 text-[11px] text-slate-500">{formatDateTime(c.statusUpdatedAt)}</div>

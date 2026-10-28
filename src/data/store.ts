@@ -1,5 +1,5 @@
 import { SCHEMA_VERSION, type Db } from '../domain/types';
-import { DB_API, REVISION_HEADER, type DbFile } from './protocol';
+import { DB_API, isDbShape, REVISION_HEADER, type DbFile } from './protocol';
 
 // One store for the whole app: every role reads the same snapshot and every change is a transaction
 // that is saved before it becomes visible. Saves carry the revision they were based on; on a conflict
@@ -64,6 +64,7 @@ export class FileBackend implements Backend {
       const body = (await res.json()) as { currentRevision?: number };
       return { ok: false, currentRevision: body.currentRevision ?? null };
     }
+    if (res.status === 422) throw new Error('Server menolak data: format basis data tidak sesuai.');
     if (!res.ok) throw new Error(`Gagal menyimpan data (${res.status})`);
     return { ok: true, revision: ((await res.json()) as { revision: number }).revision };
   }
@@ -74,7 +75,7 @@ export class BrowserBackend implements Backend {
   readonly kind = 'browser';
   readonly label = 'Penyimpanan browser (localStorage)';
   private readonly key: string;
-  constructor(key = 'jkn-service/db/v2') {
+  constructor(key = 'jkn-service/db/v3') {
     this.key = key;
   }
 
@@ -126,17 +127,7 @@ export class MemoryBackend implements Backend {
 export class ConflictError extends Error {}
 
 export function isCurrentSchema(value: unknown): value is Db {
-  const db = value as Partial<Db> | null;
-  return (
-    !!db &&
-    db.schemaVersion === SCHEMA_VERSION &&
-    db.synthetic === true &&
-    Array.isArray(db.claims) &&
-    Array.isArray(db.questions) &&
-    Array.isArray(db.assignments) &&
-    Array.isArray(db.answers) &&
-    typeof db.aiConfig === 'object'
-  );
+  return isDbShape(value, SCHEMA_VERSION);
 }
 
 export type StoreStatus = 'loading' | 'ready' | 'error';

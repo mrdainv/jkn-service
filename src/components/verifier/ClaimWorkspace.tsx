@@ -1,13 +1,14 @@
 import { ArrowLeft, Building2, FileText, User } from 'lucide-react';
 import { useState } from 'react';
+import { decisionBasis } from '../../application/commands';
 import { useAction, useApp } from '../../application/context';
 import { claimedNights, EVIDENCE_RULE_TEXT } from '../../domain/evidence';
-import { CARE_CLASS_LABEL, CARE_TYPE_LABEL, DECISION_HELP, DECISION_LABEL, FRISTA_LABEL, SEGMENT_LABEL } from '../../domain/labels';
-import { claimEvidence, currentAssignment, findClaim, fristaChecksFor, getFacility, getParticipant, getPractitioner, renderText } from '../../domain/queries';
-import type { Claim, DecisionOutcome } from '../../domain/types';
-import { ageOn, formatDate, formatDateTime, formatPeriod, formatRupiah } from '../../lib/format';
+import { CARE_CLASS_LABEL, CARE_TYPE_LABEL, DECISION_HELP, DECISION_LABEL, EVIDENCE_STATUS_LABEL, FRISTA_LABEL, SCORE_DISCLAIMER, SEGMENT_LABEL, STOP_REASON_LABEL } from '../../domain/labels';
+import { claimEvidence, configAt, currentAssignment, findClaim, fristaChecksFor, getFacility, getParticipant, getPractitioner, questionLimit, renderText } from '../../domain/queries';
+import type { Claim, DecisionBasis, DecisionOutcome } from '../../domain/types';
+import { ageOn, formatDate, formatDateTime, formatPeriod, formatRupiah, formatScore } from '../../lib/format';
 import { href } from '../../lib/router';
-import { ClaimStatusBadge, DecisionBadge, EvidenceBadge, StrengthBadge } from '../status';
+import { ClaimStatusBadge, DecisionBadge, EvidenceBadge, IndicationBadge, StrengthBadge } from '../status';
 import { Badge, Button, Card, Empty, KeyValue, Notice, PageHeader, Tabs } from '../ui';
 import { cx, inputCls, td, th } from '../styles';
 import { VERIFIER_ACTOR } from './actor';
@@ -17,7 +18,7 @@ type Tab = 'pertanyaan' | 'jawaban' | 'keputusan' | 'riwayat';
 
 const NEXT_STEP: Record<Claim['status'], string> = {
   DIAJUKAN: 'Periksa pemetaan, sesuaikan pertanyaan, lalu terbitkan ke peserta.',
-  MENUNGGU_PESERTA: 'Menunggu peserta menjawab di Mobile JKN (batas 28 hari).',
+  MENUNGGU_PESERTA: 'Menunggu peserta menjawab di Mobile JKN (batas 28 hari). AI menanyakan satu pertanyaan per langkah dan berhenti bila aturan berhenti terpenuhi.',
   JAWABAN_DITERIMA: 'Tinjau jawaban dan bukti per butir, lalu buat keputusan.',
   PERLU_KONTAK: 'Identitas peserta belum terverifikasi lewat FRISTA; perlu kontak telepon resmi.',
   DITOLAK_PESERTA: 'Peserta memilih tidak menjawab. Putuskan dengan bukti lain.',
@@ -57,6 +58,7 @@ export function ClaimWorkspace({ claimId }: { claimId: string }) {
             <span className="font-mono">{claim.id}</span>
             <ClaimStatusBadge status={claim.status} />
             {evidence?.result && <EvidenceBadge status={evidence.result.status} priority={evidence.result.priority} />}
+            {evidence?.session && evidence.scores.answered > 0 && <IndicationBadge value={evidence.scores.indication} threshold={configAt(db, evidence.session.aiConfigVersion).stopIndicationThreshold} />}
             {claim.decision && <DecisionBadge outcome={claim.decision.outcome} />}
           </span>
         }
@@ -118,7 +120,7 @@ export function ClaimWorkspace({ claimId }: { claimId: string }) {
         onChange={setTab}
         items={[
           { id: 'pertanyaan', label: 'Kamus & pertanyaan' },
-          { id: 'jawaban', label: 'Jawaban & bukti' },
+          { id: 'jawaban', label: 'Sesi AI & bukti' },
           { id: 'keputusan', label: 'Keputusan' },
           { id: 'riwayat', label: 'Riwayat' },
         ]}
@@ -139,89 +141,135 @@ function EvidencePanel({ claim }: { claim: Claim }) {
   const facility = getFacility(db, claim.facilityId);
   const slots = { faskes: facility.name, periode: formatPeriod(claim.admissionDate) };
   if (!evidence) return <Empty title="Belum ada pertanyaan yang diterbitkan">Siapkan dan terbitkan pertanyaan di tab Kamus &amp; pertanyaan.</Empty>;
-  const checks = fristaChecksFor(db, evidence.assignment.id);
+  const { session, assignment, scores } = evidence;
+  const checks = fristaChecksFor(db, assignment.id);
+  const cfg = configAt(db, session?.aiConfigVersion ?? db.aiConfig.version);
   const askedEntries = new Set(evidence.rows.map((r) => r.entry.id));
   const unasked = db.mappings.filter((m) => m.claimId === claim.id && m.target.kind === 'PROSEDUR' && (!m.entryId || !askedEntries.has(m.entryId)));
+  const subtitle = !session
+    ? `Putaran ${assignment.round} (${assignment.id}) terbit ${formatDateTime(assignment.publishedAt)} · peserta belum memulai`
+    : session.status === 'BERLANGSUNG'
+      ? `Sesi ${session.id} berlangsung sejak ${formatDateTime(session.startedAt)} · ${scores.answered} jawaban sejauh ini`
+      : `Sesi ${session.id} · selesai ${formatDateTime(session.endedAt)} lewat Mobile JKN · ${STOP_REASON_LABEL[session.stopReason!]}`;
   return (
     <div className="space-y-4">
-      <Card
-        title="Jawaban peserta dibandingkan dengan isi klaim"
-        subtitle={
-          evidence.session
-            ? `Sesi ${evidence.session.id} · dikirim ${formatDateTime(evidence.session.submittedAt)} lewat Mobile JKN · putaran ${evidence.assignment.round} (${evidence.assignment.id})`
-            : `Putaran ${evidence.assignment.round} (${evidence.assignment.id}) terbit ${formatDateTime(evidence.assignment.publishedAt)} · belum ada jawaban`
-        }
-        bodyClassName="p-0"
-      >
+      <Card title="Sesi tanya-jawab adaptif" subtitle={subtitle} bodyClassName="p-0">
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[760px]">
+          <table className="w-full min-w-[980px]">
             <thead className="bg-slate-50">
               <tr>
-                <th className={th}>#</th>
+                <th className={th}>Langkah</th>
                 <th className={th}>Pertanyaan (versi)</th>
                 <th className={th}>Isi klaim</th>
+                <th className={th}>Alasan AI memilih</th>
                 <th className={th}>Jawaban peserta</th>
-                <th className={th}>Kekuatan bukti</th>
+                <th className={th}>Evaluasi (aturan)</th>
+                <th className={th}>Skor sesudahnya</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {evidence.rows.map((r, i) => (
-                <tr key={r.questionId}>
-                  <td className={cx(td, 'tabular text-xs text-slate-500')}>{i + 1}</td>
-                  <td className={td}>
-                    <div className="text-sm">{renderText(r.version.text, slots)}</div>
-                    <div className="font-mono text-[11px] text-slate-500">
-                      {r.questionId} v{r.questionVersion}
-                    </div>
-                  </td>
-                  <td className={cx(td, 'text-xs text-slate-600')}>
-                    {r.entry.topic === 'KEBERADAAN'
-                      ? `Rawat inap di ${facility.name}`
-                      : r.entry.topic === 'LAMA_RAWAT'
-                        ? `${claimedNights(claim)} malam`
-                        : `${r.entry.code} ${claim.procedures.find((p) => p.code === r.entry.code)?.name ?? r.entry.name}`}
-                  </td>
-                  <td className={td}>
-                    {r.answer?.status === 'DILEWATI' ? (
-                      <span className="text-xs text-slate-500">Dilewati (setelah penyangkalan)</span>
-                    ) : r.option ? (
-                      <>
-                        <div className="text-sm">{r.option.label}</div>
-                        <div className="text-[11px] text-slate-500">{formatDateTime(r.answer?.answeredAt)}</div>
-                      </>
-                    ) : (
-                      <span className="text-xs text-slate-400">–</span>
-                    )}
-                  </td>
-                  <td className={td}>{evidence.session ? <StrengthBadge strength={r.strength} /> : <span className="text-xs text-slate-400">menunggu</span>}</td>
-                </tr>
-              ))}
+              {evidence.rows.map((r) => {
+                const pick = r.answer?.pick ?? (r.pending ? session?.pending?.pick : undefined);
+                return (
+                  <tr key={r.questionId} className={r.answer || r.pending ? undefined : 'bg-slate-50/50'}>
+                    <td className={cx(td, 'tabular text-xs text-slate-500')}>{r.answer ? `#${r.answer.iteration}` : r.pending ? `#${session?.pending?.iteration}` : '–'}</td>
+                    <td className={td}>
+                      <div className="text-sm">{renderText(r.version.text, slots)}</div>
+                      <div className="font-mono text-[11px] text-slate-500">
+                        {r.questionId} v{r.questionVersion}
+                      </div>
+                    </td>
+                    <td className={cx(td, 'text-xs text-slate-600')}>
+                      {r.entry.topic === 'KEBERADAAN'
+                        ? `Rawat inap di ${facility.name}`
+                        : r.entry.topic === 'LAMA_RAWAT'
+                          ? `${claimedNights(claim)} malam`
+                          : `${r.entry.code} ${claim.procedures.find((p) => p.code === r.entry.code)?.name ?? r.entry.name}`}
+                    </td>
+                    <td className={cx(td, 'max-w-xs text-xs text-slate-600')}>
+                      {pick ? (
+                        <>
+                          {pick.rationale}
+                          <div className="text-[11px] text-slate-400">
+                            peluang jawaban pasti {formatScore(pick.predictedDefinite)} · {pick.model.id}
+                          </div>
+                        </>
+                      ) : r.notAsked?.kind === 'TIDAK_RELEVAN' ? (
+                        <span>Dilewati AI: {r.notAsked.reason}</span>
+                      ) : r.notAsked ? (
+                        <span>Tidak ditanyakan: sesi berhenti lebih dulu.</span>
+                      ) : (
+                        <span className="text-slate-400">belum dipilih</span>
+                      )}
+                    </td>
+                    <td className={td}>
+                      {r.option ? (
+                        <>
+                          <div className="text-sm">{r.option.label}</div>
+                          <div className="text-[11px] text-slate-500">{formatDateTime(r.answer?.answeredAt)}</div>
+                        </>
+                      ) : r.pending ? (
+                        <span className="text-xs text-sky-700">Sedang ditanyakan</span>
+                      ) : (
+                        <span className="text-xs text-slate-400">–</span>
+                      )}
+                    </td>
+                    <td className={cx(td, 'max-w-xs')}>
+                      {r.evaluation ? (
+                        <>
+                          <StrengthBadge strength={r.evaluation.strength} />
+                          <div className="mt-1 text-[11px] text-slate-500">{r.evaluation.explanation}</div>
+                        </>
+                      ) : (
+                        <span className="text-xs text-slate-400">–</span>
+                      )}
+                    </td>
+                    <td className={cx(td, 'tabular text-xs')}>
+                      {r.answer ? (
+                        <>
+                          indikasi {formatScore(r.answer.scoresAfter.indication)}
+                          <div className="text-slate-500">dukungan {formatScore(r.answer.scoresAfter.support)}</div>
+                        </>
+                      ) : (
+                        <span className="text-slate-400">–</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
               {unasked.map((m) => (
                 <tr key={m.id} className="bg-slate-50/50">
                   <td className={td} />
-                  <td className={cx(td, 'text-xs text-slate-500')}>Tidak ditanyakan ({m.status === 'TERPETAKAN' ? 'tidak dipilih verifikator' : 'tidak ada pertanyaan kamus yang relevan'})</td>
+                  <td className={cx(td, 'text-xs text-slate-500')}>Tidak ada di putaran ({m.status === 'TERPETAKAN' ? 'tidak dipilih verifikator' : 'tidak ada pertanyaan kamus yang relevan'})</td>
                   <td className={cx(td, 'text-xs text-slate-600')}>{m.target.kind === 'PROSEDUR' && `${m.target.code} ${m.target.name}`}</td>
-                  <td className={td} />
-                  <td className={td}>
-                    <StrengthBadge strength={null} />
-                  </td>
+                  <td className={td} colSpan={4} />
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       </Card>
-      <div className="grid gap-4 lg:grid-cols-2">
-        <Card title="Pembacaan bukti (Tabel 2)">
+      <div className="grid gap-4 lg:grid-cols-3">
+        <Card title="Hasil verifikasi sesi">
           {evidence.result ? (
             <>
               <EvidenceBadge status={evidence.result.status} priority={evidence.result.priority} />
               <p className="mt-2 text-sm text-slate-700">{EVIDENCE_RULE_TEXT[evidence.result.rule]}</p>
-              <p className="mt-2 text-xs text-slate-500">Pembacaan ini mengurutkan pekerjaan verifikator. Ini bukan keputusan dan bukan skor AI; "Tidak ingat" tidak pernah dihitung sebagai bantahan.</p>
             </>
           ) : (
-            <p className="text-sm text-slate-600">Belum ada jawaban.</p>
+            <p className="text-sm text-slate-600">{session?.status === 'BERLANGSUNG' ? 'Sesi masih berlangsung; hasil akhir muncul setelah sesi berhenti.' : 'Belum ada jawaban.'}</p>
           )}
+          <dl className="mt-3 grid grid-cols-2 gap-1 text-xs">
+            <dt className="text-slate-500">Indikasi ketidaksesuaian</dt>
+            <dd className="tabular">{scores.answered ? formatScore(scores.indication) : '–'} (berhenti pada {formatScore(cfg.stopIndicationThreshold)})</dd>
+            <dt className="text-slate-500">Dukungan</dt>
+            <dd className="tabular">{scores.answered ? formatScore(scores.support) : '–'}</dd>
+            <dt className="text-slate-500">Jawaban pasti / total</dt>
+            <dd className="tabular">
+              {scores.definite} / {scores.answered} (maks. {questionLimit(db, assignment, session)})
+            </dd>
+          </dl>
+          <p className="mt-2 text-xs text-slate-500">{SCORE_DISCLAIMER} "Tidak ingat" tidak pernah dihitung sebagai bantahan.</p>
         </Card>
         <Card title="Verifikasi identitas FRISTA">
           {checks.length === 0 ? (
@@ -240,15 +288,39 @@ function EvidencePanel({ claim }: { claim: Claim }) {
           )}
           <p className="mt-2 text-xs text-slate-500">Simulasi: hanya hasil cocok/tidak cocok yang disimpan, tanpa foto atau persentase.</p>
         </Card>
+        <Card title="Cara sesi berjalan">
+          <ol className="list-decimal space-y-1 pl-4 text-xs text-slate-600">
+            <li>FRISTA cocok membuka sesi; AI memilih satu pertanyaan dari putaran yang disetujui.</li>
+            <li>Setiap jawaban dievaluasi dengan aturan Tabel 1 dan bobot keandalan (observabilitas) sebelum pertanyaan berikutnya.</li>
+            <li>Sesi berhenti bila indikasi mencapai ambang, batas {cfg.maxQuestions} pertanyaan tercapai, atau tidak ada pertanyaan relevan.</li>
+          </ol>
+        </Card>
       </div>
     </div>
+  );
+}
+
+function BasisSummary({ basis }: { basis: DecisionBasis }) {
+  return (
+    <dl className="grid grid-cols-2 gap-1 text-xs">
+      <dt className="text-slate-500">Pembacaan bukti</dt>
+      <dd>{basis.evidenceStatus === 'TANPA_JAWABAN' ? 'Tanpa jawaban peserta' : EVIDENCE_STATUS_LABEL[basis.evidenceStatus]}</dd>
+      <dt className="text-slate-500">Indikasi / dukungan</dt>
+      <dd className="tabular">
+        {formatScore(basis.indication)} / {formatScore(basis.support)}
+      </dd>
+      <dt className="text-slate-500">Jawaban</dt>
+      <dd className="tabular">{basis.answered}</dd>
+      <dt className="text-slate-500">Sesi berhenti karena</dt>
+      <dd>{basis.stopReason ? STOP_REASON_LABEL[basis.stopReason] : '–'}</dd>
+    </dl>
   );
 }
 
 const OUTCOMES: DecisionOutcome[] = ['SESUAI', 'PERLU_TINDAK_LANJUT', 'TIDAK_DAPAT_DISIMPULKAN'];
 
 function DecisionPanel({ claim }: { claim: Claim }) {
-  const { actions } = useApp();
+  const { db, actions } = useApp();
   const [outcome, setOutcome] = useState<DecisionOutcome | ''>('');
   const [reason, setReason] = useState('');
   const [decide, state] = useAction(actions.decide);
@@ -260,6 +332,10 @@ function DecisionPanel({ claim }: { claim: Claim }) {
         <p className="mt-1 text-xs text-slate-500">
           {claim.decision.decidedBy.name} · {formatDateTime(claim.decision.decidedAt)}
         </p>
+        <div className="mt-3 border-t border-slate-100 pt-3">
+          <div className="mb-1 text-xs font-medium text-slate-700">Dasar evaluasi saat diputuskan</div>
+          <BasisSummary basis={claim.decision.basis} />
+        </div>
       </Card>
     );
   }
@@ -267,6 +343,12 @@ function DecisionPanel({ claim }: { claim: Claim }) {
   return (
     <Card title="Keputusan verifikator" subtitle="Keputusan manusia. AI tidak menilai keabsahan klaim, dan selama simulasi keputusan tidak mengubah pembayaran.">
       {!ready && <Notice kind="info" className="mb-3">Keputusan dapat dibuat setelah peserta menjawab atau prosesnya berakhir.</Notice>}
+      {ready && (
+        <div className="mb-3 rounded-md border border-slate-200 bg-slate-50 p-3">
+          <div className="mb-1 text-xs font-medium text-slate-700">Dasar evaluasi yang disimpan bersama keputusan</div>
+          <BasisSummary basis={decisionBasis(db, claim)} />
+        </div>
+      )}
       <fieldset disabled={!ready} className="space-y-2">
         <legend className="sr-only">Hasil keputusan</legend>
         {OUTCOMES.map((o) => (

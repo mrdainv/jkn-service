@@ -3,8 +3,8 @@ import { useMemo, useState } from 'react';
 import { MIN_BIN_N, MIN_N, computeAnalytics, type GroupRow } from '../../../analytics/metrics';
 import { histogram, proportionDiff, wilson, type Describe } from '../../../analytics/stats';
 import { useApp } from '../../../application/context';
-import { CLAIM_STATUS_LABEL, DECISION_LABEL, EVIDENCE_STATUS_LABEL } from '../../../domain/labels';
-import type { ClaimStatus } from '../../../domain/types';
+import { CLAIM_STATUS_LABEL, DECISION_LABEL, EVIDENCE_STATUS_LABEL, SCORE_DISCLAIMER, STOP_REASON_LABEL } from '../../../domain/labels';
+import type { ClaimStatus, StopReason } from '../../../domain/types';
 import { formatNumber, formatScore } from '../../../lib/format';
 import { href } from '../../../lib/router';
 import { Badge, Notice, PageHeader, Stat } from '../../ui';
@@ -158,6 +158,7 @@ export function AnalyticsView() {
           ['operasional', 'Operasional'],
           ['cakupan', 'Cakupan kamus'],
           ['keyakinan', 'Keyakinan AI'],
+          ['sesi', 'Sesi adaptif'],
           ['respons', 'Respons peserta'],
           ['mutu', 'Kualitas data'],
           ['hasil', 'Hasil verifikasi'],
@@ -394,10 +395,49 @@ export function AnalyticsView() {
         </Section>
 
         <Section
+          id="sesi"
+          title="Sesi tanya-jawab adaptif"
+          kind="observed"
+          intro={`Setiap sesi menanyakan satu pertanyaan per langkah dan berhenti menurut aturan. ${SCORE_DISCLAIMER}`}
+        >
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+            <Stat label="Sesi selesai" value={a.adaptive.sessions} sub={`${a.adaptive.open} masih berlangsung`} />
+            <Stat
+              label="Median pertanyaan ditanyakan"
+              value={a.adaptive.asked.median === null ? '–' : formatNumber(a.adaptive.asked.median, 1)}
+              sub={`dari median ${a.adaptive.roundSize.median === null ? '–' : formatNumber(a.adaptive.roundSize.median, 1)} yang disetujui`}
+            />
+            <Stat label="Berhenti karena indikasi maksimum" value={a.adaptive.stopReasons.INDIKASI_MAKSIMUM ?? 0} sub={`${a.adaptive.reachedStop} sesi dengan indikasi 1,00`} />
+            <Stat label="Pertanyaan dilewati AI" value={a.adaptive.skippedIrrelevant} sub="tidak relevan setelah jawaban sebelumnya" />
+            <Stat label="Median indikasi akhir" value={formatScore(a.adaptive.indication.median)} sub={`median dukungan ${formatScore(a.adaptive.support.median)}`} />
+          </div>
+          <div className="grid gap-4 lg:grid-cols-2">
+            <div>
+              <h3 className="mb-2 text-xs font-medium text-slate-700">Alasan sesi berhenti</h3>
+              <ul className="space-y-1.5">
+                {(Object.keys(STOP_REASON_LABEL) as StopReason[]).map((r) => (
+                  <li key={r} className="grid grid-cols-[16rem_1fr] items-center gap-2 text-xs">
+                    <span className="text-slate-600">{STOP_REASON_LABEL[r]}</span>
+                    <HBar value={a.adaptive.stopReasons[r] ?? 0} max={Math.max(1, a.adaptive.sessions)} label={`${STOP_REASON_LABEL[r]}: ${a.adaptive.stopReasons[r] ?? 0}`} />
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <DescribeTable
+              rows={[
+                { label: 'Pertanyaan ditanyakan per sesi', d: a.adaptive.asked },
+                { label: 'Indikasi akhir', d: a.adaptive.indication },
+                { label: 'Dukungan akhir', d: a.adaptive.support },
+              ]}
+            />
+          </div>
+        </Section>
+
+        <Section
           id="respons"
           title="Respons peserta per pertanyaan"
           kind="observed"
-          intro={`Putaran terakhir per klaim. "Tidak terjawab" = tanpa respons dalam batas waktu atau dilewati setelah penyangkalan; putaran yang masih berjalan tidak dihitung. Interval tidak ditampilkan bila n < ${MIN_BIN_N}.`}
+          intro={`Putaran terakhir per klaim. "Tidak terjawab" = tanpa respons dalam batas waktu; "Tidak ditanyakan" = sesi berhenti atau AI menilai tidak relevan sebelum pertanyaan ini. Sesi yang masih berjalan tidak dihitung. Interval tidak ditampilkan bila n < ${MIN_BIN_N}.`}
         >
           <StrengthLegend />
           <div className="overflow-x-auto">
@@ -408,6 +448,7 @@ export function AnalyticsView() {
                   <th className={cx(th, 'text-right')}>Terbit</th>
                   <th className={cx(th, 'text-right')}>Dijawab</th>
                   <th className={th}>Tidak terjawab</th>
+                  <th className={th}>Tidak ditanyakan</th>
                   <th className={th}>"Tidak ingat"</th>
                   <th className={th}>Bertentangan</th>
                   <th className={th}>Sebaran jawaban</th>
@@ -427,6 +468,9 @@ export function AnalyticsView() {
                     <td className={cx(td, 'tabular text-right text-xs')}>{q.answered}</td>
                     <td className={td}>
                       <PropCell p={q.unanswered} compact />
+                    </td>
+                    <td className={td}>
+                      <PropCell p={q.notAsked} compact />
                     </td>
                     <td className={td}>
                       <PropCell p={q.unsure} compact />
@@ -461,7 +505,7 @@ export function AnalyticsView() {
               sub={'"Pulang hari itu" tetapi menyebut jumlah malam'}
             />
             <Stat label="Putaran tanpa respons" value={pct(a.quality.noResponse.p)} sub={`${a.quality.noResponse.k} dari ${a.quality.noResponse.n} putaran selesai`} />
-            <Stat label="Butir dilewati" value={a.quality.skipped} sub="setelah penyangkalan" />
+            <Stat label="Butir tidak ditanyakan" value={a.quality.notAsked} sub={`sesi berhenti lebih dulu; ${a.quality.skippedIrrelevant} dinilai tidak relevan`} />
             <Stat
               label="FRISTA tidak cocok / tidak tersedia"
               value={`${a.quality.fristaMismatch} / ${a.quality.fristaUnavailable}`}

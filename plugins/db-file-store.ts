@@ -6,7 +6,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Plugin } from 'vite';
-import { DB_API, DB_DIR, DB_FILE, MAX_DB_BYTES, REVISION_HEADER } from '../src/data/protocol.ts';
+import { DB_API, DB_DIR, DB_FILE, isDbShape, MAX_DB_BYTES, REVISION_HEADER } from '../src/data/protocol.ts';
+import { SCHEMA_VERSION } from '../src/domain/types.ts';
 
 type Next = (err?: unknown) => void;
 
@@ -88,6 +89,7 @@ export function createDbMiddleware(options: { dir: string; now?: () => Date }) {
           throw new HttpError(400, { error: 'MALFORMED_JSON' });
         }
         if (!body || typeof body.db !== 'object' || body.db === null) throw new HttpError(400, { error: 'DB_REQUIRED' });
+        if (!isDbShape(body.db, SCHEMA_VERSION)) throw new HttpError(422, { error: 'DB_SHAPE', schemaVersion: SCHEMA_VERSION });
         const saved = await exclusive(async () => {
           const current = await currentRevision();
           if (current !== expected) throw new HttpError(409, { error: 'REVISION_CONFLICT', currentRevision: current });

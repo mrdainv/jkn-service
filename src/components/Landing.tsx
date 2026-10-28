@@ -8,10 +8,10 @@ import { Card, Notice } from './ui';
 const STEPS: { title: string; who: string; text: string }[] = [
   { title: 'Klaim diajukan', who: 'Faskes', text: 'Rumah sakit mengisi formulir klaim; sistem menyimpan dan menautkannya ke peserta dan faskes.' },
   { title: 'Pemetaan kamus', who: 'Sistem', text: 'Atribut klaim dicocokkan dengan kamus pengalaman; AI (simulasi) memberi skor keyakinan per pertanyaan.' },
-  { title: 'Persiapan pertanyaan', who: 'Verifikator', text: 'Pilih, sunting, hapus, atau minta draf AI untuk tindakan yang belum ada di kamus.' },
+  { title: 'Persiapan pertanyaan', who: 'Verifikator', text: 'Setujui, sunting, atau minta draf AI untuk tindakan yang belum ada di kamus.' },
   { title: 'Terbit & notifikasi', who: 'Verifikator → Peserta', text: 'Versi pertanyaan dikunci pada putaran yang diterbitkan; peserta mendapat notifikasi.' },
-  { title: 'FRISTA & jawaban', who: 'Peserta', text: 'Cek wajah, lalu jawab pilihan ganda. Semua jawaban dikirim sekaligus dengan versi pertanyaannya.' },
-  { title: 'Tinjauan & analitik', who: 'Verifikator', text: 'Bukti per butir, keputusan manusia, dan dasbor yang dihitung dari catatan yang sama.' },
+  { title: 'Sesi adaptif', who: 'Peserta ↔ AI (simulasi)', text: 'Setelah FRISTA, satu pertanyaan per langkah: jawaban dievaluasi, skor diperbarui, lalu AI memilih pertanyaan berikutnya atau berhenti.' },
+  { title: 'Tinjauan & analitik', who: 'Verifikator', text: 'Hasil sesi, keputusan manusia beserta dasarnya, dan dasbor yang dihitung dari catatan yang sama.' },
 ];
 
 const ROLES = [
