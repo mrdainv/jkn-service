@@ -1,8 +1,9 @@
 import type { AnswerOption } from './types';
 
 /**
- * System checks on participant wording, applied to AI drafts and verifier edits before they can be
- * approved or published. They guard the wording, not the clinical content: that stays a human job.
+ * System checks on participant wording and on how each answer counts, applied to AI drafts and verifier
+ * edits before they can be approved or published. They guard the wording and the consistency of the
+ * per-option fraud scores, not the clinical content: that stays a human job.
  */
 
 export type CheckId =
@@ -16,7 +17,8 @@ export type CheckId =
   | 'OPSI_MENDUKUNG'
   | 'OPSI_BERTENTANGAN'
   | 'OPSI_KOSONG'
-  | 'OPSI_GANDA';
+  | 'OPSI_GANDA'
+  | 'SKOR_FRAUD';
 
 export interface CheckResult {
   id: CheckId;
@@ -35,6 +37,24 @@ function containsTerm(text: string, term: string): boolean {
   return new RegExp(`(^|[^a-z])${escaped}([^a-z]|$)`, 'i').test(text);
 }
 
+/**
+ * The rule every option's fraud score follows, so the score and the Table 1 strength never disagree:
+ * "Tidak ingat", neutral and fully supporting options carry 0; a denial carries 1 and nothing else may;
+ * contradicting options and night ranges carry more than 0; partly supporting options may carry some.
+ * Returns what is wrong, or null when the option follows the rule.
+ */
+export function optionScoreProblem(o: AnswerOption): string | null {
+  const s = o.fraudScore;
+  if (typeof s !== 'number' || !Number.isFinite(s) || s < 0 || s > 1) return 'harus di antara 0 dan 1';
+  if (o.denial) return s === 1 ? null : 'penyangkalan harus 1';
+  if (o.unsure) return s === 0 ? null : '"Tidak ingat" harus 0';
+  if (s === 1) return 'hanya penyangkalan yang boleh 1';
+  if (o.mapping.kind === 'RENTANG_MALAM') return s > 0 ? null : 'rentang malam perlu di atas 0 (berlaku bila klaim di luar rentang)';
+  if (o.mapping.strength === 'BERTENTANGAN') return s > 0 ? null : 'pilihan bertentangan perlu di atas 0';
+  if (o.mapping.strength === 'SEBAGIAN') return null;
+  return s === 0 ? null : 'pilihan mendukung penuh atau netral harus 0';
+}
+
 export function checkQuestion(text: string, options: readonly AnswerOption[], avoidTerms: readonly string[]): CheckResult[] {
   const body = ALLOWED_SLOTS.reduce((t, slot) => t.split(slot).join(' '), text).trim();
   const all = [body, ...options.map((o) => o.label)].join(' \n ');
@@ -43,6 +63,10 @@ export function checkQuestion(text: string, options: readonly AnswerOption[], av
   const labels = options.map((o) => o.label.trim().toLowerCase());
   const strengths = options.map((o) => (o.mapping.kind === 'TETAP' ? o.mapping.strength : 'RENTANG'));
   const hasNights = options.some((o) => o.mapping.kind === 'RENTANG_MALAM');
+  const scoreProblems = options.flatMap((o) => {
+    const problem = optionScoreProblem(o);
+    return problem ? [`"${o.label.trim() || o.id}" ${problem}`] : [];
+  });
 
   return [
     {
@@ -100,6 +124,11 @@ export function checkQuestion(text: string, options: readonly AnswerOption[], av
       id: 'OPSI_BERTENTANGAN',
       ok: hasNights || strengths.includes('BERTENTANGAN'),
       message: 'Ada pilihan yang bertentangan dengan isi klaim.',
+    },
+    {
+      id: 'SKOR_FRAUD',
+      ok: scoreProblems.length === 0,
+      message: scoreProblems.length ? `Skor fraud pilihan: ${scoreProblems.join('; ')}.` : 'Setiap pilihan punya skor fraud yang selaras dengan kekuatan buktinya.',
     },
   ];
 }

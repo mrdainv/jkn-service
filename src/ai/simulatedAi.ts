@@ -1,5 +1,6 @@
 import { checkQuestion, checksPass } from '../domain/checks';
-import type { AnswerOption, CareType, DictionaryEntry } from '../domain/types';
+import { FRAUD_LEVEL_LABEL, MATCH_TYPE_LABEL } from '../domain/labels';
+import type { AnswerOption, CareType } from '../domain/types';
 import { DEFAULT_OBSERVABILITY } from '../domain/verification';
 import { formatNumber } from '../lib/format';
 import { hashString, prng } from '../lib/random';
@@ -7,6 +8,7 @@ import { findProcedure } from './reference';
 import type {
   AiModelInfo,
   ClaimContext,
+  DraftReference,
   DraftRequest,
   DraftResponse,
   NextQuestionRequest,
@@ -21,8 +23,10 @@ import type {
 /**
  * Deterministic stand-in for the question AI. It does no learning and no language modelling: scores
  * come from dictionary attributes plus a fixed per-claim jitter, the next question follows fixed
- * ordering rules over the approved round, and drafts are filled templates. Same input, same output. Its
- * scores are only as good as those rules; the analytics page measures them.
+ * ordering rules over the approved round (switching to confirming questions at the level the system read
+ * from the configured thresholds), and drafts are filled templates whose option fraud scores follow the
+ * reference entries. Same input, same output. Its scores are only as good as those rules; the analytics
+ * page measures them.
  */
 
 export const SIMULATED_MODEL: AiModelInfo = {
@@ -75,8 +79,9 @@ function episodeOrder(item: PoolItem): number {
 /**
  * Next question of an adaptive session. Presence first (it frames everything else), then the length of
  * stay unless the participant said they did not stay, then procedures: by predicted chance of a definite
- * answer, or, once an answer contradicted the claim, by how observable the experience is, to confirm
- * with the clearest question left. Ties keep the verifier's order.
+ * answer, or, once the fraud indication is at the medium level or above (the level comes with the
+ * request, read from the configured thresholds), by how observable the experience is, to confirm with
+ * the clearest question left. Ties keep the verifier's order.
  */
 export function nextSync(request: NextQuestionRequest): NextQuestionResponse {
   const skipped: NextQuestionResponse['skipped'] = [];
@@ -89,7 +94,7 @@ export function nextSync(request: NextQuestionRequest): NextQuestionResponse {
     return true;
   });
   if (eligible.length === 0 || request.remaining <= 0) return { next: null, skipped };
-  const confirming = request.scores.indication > 0;
+  const confirming = request.scores.level !== 'RENDAH';
   const scored = eligible.map((p) => ({ p, score: p.priorConfidence ?? scoreFor(request.claim, p), obs: p.entry.observability ?? DEFAULT_OBSERVABILITY }));
   scored.sort(
     (a, b) =>
@@ -104,7 +109,7 @@ export function nextSync(request: NextQuestionRequest): NextQuestionResponse {
   if (best.p.entry.topic === 'KEBERADAAN') rationale = 'Kehadiran dan menginap ditanyakan lebih dulu karena menjadi dasar pertanyaan lain.';
   else if (best.p.entry.topic === 'LAMA_RAWAT') rationale = `Lama menginap ditanyakan setelah ${asked} jawaban; klaim mencatat ${request.claim.claimedNights ?? '–'} malam.`;
   else if (confirming)
-    rationale = `Ada jawaban yang bertentangan (indikasi ${formatNumber(request.scores.indication, 2)}); dipilih pengalaman paling mudah dikenali (observabilitas ${formatNumber(best.obs, 2)}) dari ${eligible.length} pertanyaan tersisa untuk konfirmasi.`;
+    rationale = `${FRAUD_LEVEL_LABEL[request.scores.level]} (${formatNumber(request.scores.indication, 2)}; ambang sedang ${formatNumber(request.thresholds.medium, 2)}, tinggi ${formatNumber(request.thresholds.high, 2)}); dipilih pengalaman paling mudah dikenali (observabilitas ${formatNumber(best.obs, 2)}) dari ${eligible.length} pertanyaan tersisa untuk konfirmasi.`;
   else rationale = `Peluang jawaban pasti tertinggi (${formatNumber(best.score, 2)}) dari ${eligible.length} pertanyaan tersisa.`;
   return { next: { questionId: best.p.questionId, version: best.p.version, predictedDefinite: best.score, rationale }, skipped };
 }
@@ -129,36 +134,58 @@ function lowerFirst(s: string): string {
   return s.charAt(0).toLowerCase() + s.slice(1);
 }
 
+/** The model's own option scores, used only when no reference entry shows how similar options were scored. */
+const SCORE_PRIOR = { BERTENTANGAN: 0.6, SEBAGIAN: 0.2 } as const;
+
 function unsure(): AnswerOption {
-  return { id: 'TIDAK_INGAT', label: 'Tidak ingat', mapping: { kind: 'TETAP', strength: 'NETRAL' }, unsure: true };
+  return { id: 'TIDAK_INGAT', label: 'Tidak ingat', mapping: { kind: 'TETAP', strength: 'NETRAL' }, fraudScore: 0, unsure: true };
 }
 
-function fixed(id: string, label: string, strength: 'KUAT' | 'SEBAGIAN' | 'BERTENTANGAN'): AnswerOption {
-  return { id, label, mapping: { kind: 'TETAP', strength } };
+function fixed(id: string, label: string, strength: 'KUAT' | 'SEBAGIAN' | 'BERTENTANGAN', fraudScore = 0): AnswerOption {
+  return { id, label, mapping: { kind: 'TETAP', strength }, fraudScore };
 }
 
-/** Same category first, then same code family; at most three. */
-function referencesFor(code: string, category: string, dictionary: readonly DictionaryEntry[]): DictionaryEntry[] {
+/** The entry the mapping matched first (it was the closest the dictionary had), then same category, then same code family; at most three. */
+function referencesFor(request: DraftRequest): DraftReference[] {
+  const { code, category } = request.target;
   const family = code.split('.')[0];
-  return dictionary
-    .filter((e) => e.scope === 'PROSEDUR' && e.status === 'AKTIF' && e.code !== code)
-    .map((e) => ({ e, w: (e.category === category ? 2 : 0) + (e.code?.split('.')[0] === family ? 1 : 0) }))
+  const usable = request.dictionary.filter((r) => r.entry.scope === 'PROSEDUR' && r.entry.status === 'AKTIF' && r.entry.code !== code);
+  const matched = usable.find((r) => r.entry.id === request.analysis?.matchedEntryId);
+  const rest = usable
+    .filter((r) => r !== matched)
+    .map((r) => ({ r, w: (r.entry.category === category ? 2 : 0) + (r.entry.code?.split('.')[0] === family ? 1 : 0) }))
     .filter((x) => x.w > 0)
-    .sort((a, b) => b.w - a.w || (a.e.code ?? '').localeCompare(b.e.code ?? ''))
-    .slice(0, 3)
-    .map((x) => x.e);
+    .sort((a, b) => b.w - a.w || (a.r.entry.code ?? '').localeCompare(b.r.entry.code ?? ''))
+    .map((x) => x.r);
+  return [...(matched ? [matched] : []), ...rest].slice(0, 3);
+}
+
+/** Mean fraud score of the reference options with this strength (denials excluded), or null when none has one. */
+function referenceScore(references: readonly DraftReference[], strength: 'BERTENTANGAN' | 'SEBAGIAN'): number | null {
+  const scores = references.flatMap((r) => r.options.filter((o) => o.mapping.kind === 'TETAP' && o.mapping.strength === strength && !o.denial && o.fraudScore > 0).map((o) => o.fraudScore));
+  return scores.length ? round2(clamp(scores.reduce((a, b) => a + b, 0) / scores.length, 0.05, 0.95)) : null;
 }
 
 export function draftSync(request: DraftRequest): DraftResponse {
-  const { target, variant } = request;
-  const phrase = stayPhrase(request.claim?.careType ?? 'RAWAT_INAP');
+  const { target, variant, claim, analysis } = request;
+  const phrase = stayPhrase(claim?.careType ?? 'RAWAT_INAP');
   const ref = findProcedure(target.code);
   const experiences = ref?.experiences ?? [];
   // The catalogue's term list when there is one; otherwise at least the coded name itself.
   const avoidTerms = ref?.avoidTerms ?? [target.name];
-  const references = referencesFor(target.code, target.category, request.dictionary);
+  const references = referencesFor(request);
   const generic = GENERIC_BY_CATEGORY[target.category];
   const found = experiences.length > 0;
+  const line = analysis ? claim?.procedures.find((p) => p.lineId === analysis.lineId) : undefined;
+  // Billed more than once: a participant who had it only once partly supports the claim and contradicts the quantity.
+  const several = (line?.quantity ?? 1) > 1;
+
+  const refContra = referenceScore(references, 'BERTENTANGAN');
+  const refPartial = referenceScore(references, 'SEBAGIAN');
+  const contra = refContra ?? SCORE_PRIOR.BERTENTANGAN;
+  const partial = refPartial ?? SCORE_PRIOR.SEBAGIAN;
+  const no = (id: string, label: string) => fixed(id, label, 'BERTENTANGAN', contra);
+  const once = several ? [fixed('HANYA_SEKALI', 'Pernah, tetapi hanya sekali', 'SEBAGIAN', contra)] : [];
 
   let text: string;
   let options: AnswerOption[];
@@ -171,8 +198,9 @@ export function draftSync(request: DraftRequest): DraftResponse {
       text = `${phrase.at}, apakah Anda ingat ${lowerFirst(e1)}?`;
       options = [
         fixed('YA', 'Ya, saya ingat mengalaminya', 'KUAT'),
-        fixed('MIRIP', 'Pernah, tetapi tidak persis seperti itu', 'SEBAGIAN'),
-        fixed('TIDAK', 'Tidak, hal itu tidak pernah terjadi', 'BERTENTANGAN'),
+        ...once,
+        fixed('MIRIP', 'Pernah, tetapi tidak persis seperti itu', 'SEBAGIAN', partial),
+        no('TIDAK', 'Tidak, hal itu tidak pernah terjadi'),
         unsure(),
       ];
     } else if (v === 1) {
@@ -180,22 +208,23 @@ export function draftSync(request: DraftRequest): DraftResponse {
       options = [
         fixed('PENGALAMAN_1', e1, 'KUAT'),
         ...(e2 ? [fixed('PENGALAMAN_2', e2, 'KUAT')] : []),
-        fixed('TIDAK_ADA', 'Tidak ada yang seperti itu', 'BERTENTANGAN'),
+        ...once,
+        no('TIDAK_ADA', 'Tidak ada yang seperti itu'),
         unsure(),
       ];
     } else {
       text = `Ingatkah Anda mengalami hal ini ${phrase.during}: ${lowerFirst(e1)}${e2 ? `, lalu ${lowerFirst(e2)}` : ''}?`;
-      options = [fixed('YA', 'Ya, saya mengalaminya', 'KUAT'), fixed('TIDAK', 'Tidak pernah', 'BERTENTANGAN'), unsure()];
+      options = [fixed('YA', 'Ya, saya mengalaminya', 'KUAT'), ...once, no('TIDAK', 'Tidak pernah'), unsure()];
     }
   } else if (generic) {
     usedExperiences = [generic.experience];
     text = generic.text(phrase.at);
-    options = [fixed('YA', 'Ya, pernah', 'KUAT'), fixed('TIDAK', 'Tidak pernah', 'BERTENTANGAN'), unsure()];
+    options = [fixed('YA', 'Ya, pernah', 'KUAT'), ...once, no('TIDAK', 'Tidak pernah'), unsure()];
   } else {
     // No lay description available: return a template the verifier must complete, never invented detail.
     usedExperiences = [];
     text = `${phrase.at}, apakah Anda menjalani [jelaskan "${target.name}" dengan bahasa sehari-hari]?`;
-    options = [fixed('YA', 'Ya, pernah', 'KUAT'), fixed('TIDAK', 'Tidak pernah', 'BERTENTANGAN'), unsure()];
+    options = [fixed('YA', 'Ya, pernah', 'KUAT'), ...once, no('TIDAK', 'Tidak pernah'), unsure()];
   }
 
   const pass = checksPass(checkQuestion(text, options, avoidTerms));
@@ -208,25 +237,41 @@ export function draftSync(request: DraftRequest): DraftResponse {
     ),
   );
 
+  const matched = analysis?.matchedEntryId ? references.find((r) => r.entry.id === analysis.matchedEntryId) : undefined;
+  const usesPartial = options.some((o) => o.id === 'MIRIP');
   const parts = [
     found
       ? `Pengalaman pasien diambil dari katalog referensi simulasi untuk kode ${target.code} (belum divalidasi klinisi).`
       : generic
         ? `Tidak ada deskripsi pengalaman untuk kode ${target.code}; draf dibuat dari kategori "${target.category}" saja.`
         : `Tidak ada deskripsi pengalaman untuk kode ${target.code}; draf berupa templat yang wajib dilengkapi verifikator.`,
+    analysis
+      ? matched
+        ? `Pemetaan klaim mencocokkan baris ini ke entri ${matched.entry.code} (${MATCH_TYPE_LABEL[analysis.matchType].toLowerCase()}, relevansi ${formatNumber(analysis.relevance, 2)}); entri itu dipakai sebagai rujukan pertama.`
+        : `Pemetaan klaim tidak menemukan entri kamus yang cocok untuk baris ini.`
+      : null,
     references.length
-      ? `Struktur pilihan jawaban mengikuti entri kamus ${references.map((r) => r.code).join(', ')} (mendukung / bertentangan / "Tidak ingat").`
+      ? `Struktur pilihan jawaban mengikuti entri kamus ${references.map((r) => r.entry.code).join(', ')} (mendukung / bertentangan / "Tidak ingat").`
       : 'Tidak ada entri kamus sejenis sebagai rujukan.',
+    `Skor fraud per pilihan: bertentangan ${formatNumber(contra, 2)} (${refContra === null ? 'nilai awal model' : 'rata-rata pilihan bertentangan di entri rujukan'})${usesPartial ? `, sebagian ${formatNumber(partial, 2)} (${refPartial === null ? 'nilai awal model' : 'rata-rata pilihan sebagian di entri rujukan'})` : ''}, mendukung dan "Tidak ingat" 0.`,
+    several ? `Klaim menagih tindakan ini ${line!.quantity} kali, jadi ada pilihan "hanya sekali" dengan skor fraud setara bantahan.` : null,
     `Varian templat ${v + 1} dari 3.`,
-  ];
+  ].filter((x): x is string => x !== null);
 
   return {
     proposal: { text, options, experiences: usedExperiences, avoidTerms },
     confidence,
     rationale: parts.join(' '),
-    referenceEntryIds: references.map((r) => r.id),
+    referenceEntryIds: references.map((r) => r.entry.id),
     experienceSourceFound: found,
-    claimAttributes: ['kode tindakan', 'nama tindakan', 'kategori layanan', ...(request.claim ? ['jenis rawat'] : [])],
+    claimAttributes: [
+      'kode tindakan',
+      'nama tindakan',
+      'kategori layanan',
+      ...(claim ? ['jenis rawat'] : []),
+      ...(several ? ['jumlah tindakan'] : []),
+      ...(matched ? ['hasil pemetaan kamus'] : []),
+    ],
   };
 }
 

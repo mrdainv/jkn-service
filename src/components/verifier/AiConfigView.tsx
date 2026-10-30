@@ -3,7 +3,8 @@ import { useState } from 'react';
 import { useAction, useApp } from '../../application/context';
 import { AI_REQUEST_FIELDS } from '../../ai/service';
 import { MAX_POOL_QUESTIONS, RESPONSE_WINDOW_DAYS } from '../../application/commands';
-import { CONTRADICTION_WEIGHT, DEFAULT_OBSERVABILITY, EVALUATION_RULES } from '../../domain/verification';
+import { FRAUD_LEVEL_EFFECT, FRAUD_LEVEL_LABEL } from '../../domain/labels';
+import { DEFAULT_OBSERVABILITY, EVALUATION_RULES } from '../../domain/verification';
 import { formatDateTime, formatScore } from '../../lib/format';
 import { Badge, Button, Card, Field, KeyValue, Notice, PageHeader } from '../ui';
 import { inputCls, td, th } from '../styles';
@@ -17,7 +18,8 @@ export function AiConfigView() {
     autoSelectThreshold: String(cfg.autoSelectThreshold),
     maxQuestions: String(cfg.maxQuestions),
     draftWarningThreshold: String(cfg.draftWarningThreshold),
-    stopIndicationThreshold: String(cfg.stopIndicationThreshold),
+    fraudMediumThreshold: String(cfg.fraudMediumThreshold),
+    fraudHighThreshold: String(cfg.fraudHighThreshold),
   });
   const [save, state] = useAction(actions.updateAiConfig);
   const [saved, setSaved] = useState(false);
@@ -26,7 +28,8 @@ export function AiConfigView() {
     autoSelectThreshold: Number(form.autoSelectThreshold),
     maxQuestions: Number(form.maxQuestions),
     draftWarningThreshold: Number(form.draftWarningThreshold),
-    stopIndicationThreshold: Number(form.stopIndicationThreshold),
+    fraudMediumThreshold: Number(form.fraudMediumThreshold),
+    fraudHighThreshold: Number(form.fraudHighThreshold),
   };
   const changed = (Object.keys(patch) as (keyof typeof patch)[]).filter((k) => patch[k] !== cfg[k]);
   const history = [...db.aiConfigHistory, cfg].reverse();
@@ -59,12 +62,19 @@ export function AiConfigView() {
           <div className="mt-3 text-xs text-slate-600">
             <div className="font-medium text-slate-700">Evaluasi jawaban ({EVALUATION_RULES}, aturan, bukan AI)</div>
             <ul className="mt-1 list-disc space-y-0.5 pl-4">
-              <li>Kekuatan bukti per jawaban dari Tabel 1; keandalan = observabilitas entri (default {DEFAULT_OBSERVABILITY}) bila jawaban pasti, 0 bila "Tidak ingat".</li>
-              <li>
-                Bobot bantahan = keandalan × {CONTRADICTION_WEIGHT.KEBERADAAN} (menginap), {CONTRADICTION_WEIGHT.LAMA_RAWAT} (lama rawat), {CONTRADICTION_WEIGHT.PROSEDUR} (tindakan); penyangkalan
-                bernilai 1.
-              </li>
-              <li>Indikasi = gabungan noisy-OR bobot bantahan; mencapai 1,00 hanya lewat penyangkalan. Dukungan dihitung dengan cara yang sama dari jawaban yang mendukung.</li>
+              <li>Setiap pilihan jawaban punya skor fraud sendiri (0–1), disimpan di versi pertanyaan dan dapat disunting verifikator. Pertanyaan tidak punya skor.</li>
+              <li>Keandalan = observabilitas entri (default {DEFAULT_OBSERVABILITY}) bila jawaban pasti, 0 bila "Tidak ingat".</li>
+              <li>Bobot fraud jawaban = skor fraud pilihan yang dipilih × keandalan; penyangkalan bernilai 1. Rentang malam hanya berbobot bila klaim di luar rentang.</li>
+              <li>Indikasi fraud = gabungan noisy-OR bobot fraud; mencapai 1,00 hanya lewat penyangkalan. Dukungan dihitung dengan cara yang sama dari jawaban yang mendukung.</li>
+              <li>Tingkat indikasi dibaca dari ambang di samping, dengan konfigurasi saat sesi dimulai:</li>
+            </ul>
+            <ul className="mt-1 space-y-0.5 pl-4">
+              {(['RENDAH', 'SEDANG', 'TINGGI'] as const).map((l) => (
+                <li key={l}>
+                  <span className="font-medium">{FRAUD_LEVEL_LABEL[l]}</span>
+                  {l === 'RENDAH' ? ` (< ${formatScore(cfg.fraudMediumThreshold)})` : l === 'SEDANG' ? ` (≥ ${formatScore(cfg.fraudMediumThreshold)})` : ` (≥ ${formatScore(cfg.fraudHighThreshold)})`}: {FRAUD_LEVEL_EFFECT[l]}
+                </li>
+              ))}
             </ul>
           </div>
         </Card>
@@ -74,7 +84,8 @@ export function AiConfigView() {
             {field('autoSelectThreshold', 'Ambang pilih otomatis (keyakinan AI)', 'Usulan dengan keyakinan AI di bawah nilai ini tetap ditampilkan tetapi tidak dicentang.')}
             {field('maxQuestions', 'Maksimal pertanyaan ditanyakan per sesi', `Termasuk pertanyaan episode; juga batas centang otomatis. Verifikator dapat menyetujui hingga ${MAX_POOL_QUESTIONS}. 1–8.`, '1', '8')}
             {field('draftWarningThreshold', 'Ambang peringatan draf AI', 'Draf AI di bawah nilai ini diberi tanda peringatan.')}
-            {field('stopIndicationThreshold', 'Ambang berhenti indikasi', 'Sesi berhenti bila indikasi ketidaksesuaian mencapai nilai ini. 1,00 = hanya penyangkalan yang menghentikan. 0,5–1. Berlaku untuk sesi baru.', '0.05', '1', '0.5')}
+            {field('fraudMediumThreshold', 'Ambang indikasi fraud sedang', 'Indikasi yang mencapai nilai ini: hasil sesi "perlu diperiksa" dan AI beralih ke pertanyaan konfirmasi. Harus di atas 0 dan di bawah ambang tinggi. Berlaku untuk sesi baru.')}
+            {field('fraudHighThreshold', 'Ambang indikasi fraud tinggi (berhenti)', 'Indikasi yang mencapai nilai ini: sesi berhenti dan klaim didahulukan. 1,00 = hanya penyangkalan yang menghentikan. Berlaku untuk sesi baru.')}
           </div>
           <Notice kind="warn" className="mt-4">
             Ambang di sini adalah pilihan kebijakan, bukan nilai optimal. Analitik AI menunjukkan apa yang terjadi di sekitar ambang dengan data yang ada; menetapkan ambang "terbaik" memerlukan
@@ -98,7 +109,8 @@ export function AiConfigView() {
                 <th className={th}>Pilih otomatis</th>
                 <th className={th}>Maks. pertanyaan</th>
                 <th className={th}>Peringatan draf</th>
-                <th className={th}>Berhenti indikasi</th>
+                <th className={th}>Indikasi sedang</th>
+                <th className={th}>Indikasi tinggi</th>
                 <th className={th}>Diubah</th>
               </tr>
             </thead>
@@ -110,7 +122,8 @@ export function AiConfigView() {
                   <td className={`${td} tabular`}>{formatScore(h.autoSelectThreshold)}</td>
                   <td className={`${td} tabular`}>{h.maxQuestions}</td>
                   <td className={`${td} tabular`}>{formatScore(h.draftWarningThreshold)}</td>
-                  <td className={`${td} tabular`}>{formatScore(h.stopIndicationThreshold)}</td>
+                  <td className={`${td} tabular`}>{formatScore(h.fraudMediumThreshold)}</td>
+                  <td className={`${td} tabular`}>{formatScore(h.fraudHighThreshold)}</td>
                   <td className={`${td} text-xs text-slate-500`}>
                     {formatDateTime(h.updatedAt)} · {h.updatedBy.name}
                   </td>

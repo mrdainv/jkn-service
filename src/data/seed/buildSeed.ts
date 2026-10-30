@@ -8,6 +8,7 @@ import {
   discardDraft,
   participantActor,
   publishQuestions,
+  draftRequestFor,
   recordDraft,
   recordFrista,
   submitClaim,
@@ -22,13 +23,13 @@ import { SCHEMA_VERSION } from '../../domain/types';
 import { parseCsv } from '../../lib/csv';
 import { hashString, intBetween, pick, prng } from '../../lib/random';
 import claimsCsv from '../../../datasets/1_dataset_klaim_bpjs_sample_training.csv?raw';
-import { FACILITIES, INA_CBG, INITIAL_AI_CONFIG, initialDictionary, practitionerFor, PRACTITIONERS, SEED_EPOCH, VERIFIER } from './reference';
+import { FACILITIES, INA_CBG, INITIAL_AI_CONFIG, initialDictionary, PANEL_FRAUD_SCORE, practitionerFor, PRACTITIONERS, SEED_EPOCH, VERIFIER } from './reference';
 
 // Builds the simulation database deterministically. Historical claims come from the claims dataset
 // (June 2026); their verification is simulated by replaying the real commands in time order. Ground
 // truth from the dataset only steers the simulated participants and is never stored.
 
-export const DATASET_ID = 'sim-2026-10-27-v1';
+export const DATASET_ID = 'sim-2026-10-30-v2';
 const MODEL = { id: SIMULATED_MODEL.id, version: SIMULATED_MODEL.version, kind: SIMULATED_MODEL.kind };
 /** The simulated AI, called synchronously: the seed replays commands without the async actions layer. */
 const AI: AiPort = { rank: rankSync, next: nextSync };
@@ -145,7 +146,7 @@ function simulatedEdit(base: { text: string; options: AnswerOption[] }): { text:
   if (base.text.startsWith('Selama dirawat, ')) return { text: base.text.replace('Selama dirawat, ', 'Saat dirawat di {faskes}, '), options: base.options };
   const hasPartial = base.options.some((o) => o.mapping.kind === 'TETAP' && o.mapping.strength === 'SEBAGIAN');
   if (hasPartial || base.options.some((o) => o.mapping.kind === 'RENTANG_MALAM')) return null;
-  const partial: AnswerOption = { id: 'SEBAGIAN', label: 'Pernah, tetapi tidak persis seperti itu', mapping: { kind: 'TETAP', strength: 'SEBAGIAN' } };
+  const partial: AnswerOption = { id: 'SEBAGIAN', label: 'Pernah, tetapi tidak persis seperti itu', mapping: { kind: 'TETAP', strength: 'SEBAGIAN' }, fraudScore: PANEL_FRAUD_SCORE.SEBAGIAN };
   const unsureAt = base.options.findIndex((o) => o.unsure);
   return { text: base.text, options: [...base.options.slice(0, unsureAt), partial, ...base.options.slice(unsureAt)] };
 }
@@ -393,7 +394,7 @@ export function buildSeed(): Db {
   t.at(infusionDraftAt, () => {
     const claim = db.claims.find((c) => c.procedures.some((p) => p.code === '99.18'))!;
     const target = { code: '99.18', name: 'Infus cairan elektrolit', category: 'Tindakan' };
-    const response = draftSync({ target, claim: { careType: claim.careType }, dictionary: db.dictionary, variant: 0 });
+    const response = draftSync(draftRequestFor(db, claim.id, target, 0));
     const draft = recordDraft(db, { claimId: claim.id, target, response, variant: 0, previousDraftId: null, model: MODEL }, { now: infusionDraftAt, actor: VERIFIER });
     const discardAt = plus(infusionDraftAt, 14);
     t.at(discardAt, () =>

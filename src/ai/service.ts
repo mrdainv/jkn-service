@@ -1,4 +1,5 @@
-import type { AiKind, AnswerOption, CareType, CodedItem, DictionaryEntry, DraftProposal, EpisodeTopic, Strength, VerificationScores } from '../domain/types';
+import type { AiKind, AnswerOption, CareType, CodedItem, DictionaryEntry, DraftProposal, EpisodeTopic, MappingStatus, MatchType, Strength, VerificationScores } from '../domain/types';
+import type { FraudThresholds } from '../domain/verification';
 
 /**
  * The only boundary between the application and an AI. Today it is backed by a deterministic
@@ -31,8 +32,15 @@ export interface ClaimContext {
 /** What each AI request carries, shown on the configuration page. Kept next to the types it describes. */
 export const AI_REQUEST_FIELDS: Record<'rank' | 'next' | 'draft', string[]> = {
   rank: ['ID klaim (kunci samaran)', 'jenis rawat', 'jumlah malam', 'diagnosis utama', 'kode, nama, dan jumlah tindakan', 'kandidat pertanyaan dengan entri kamus dan relevansi'],
-  next: ['konteks klaim yang sama', 'pertanyaan putaran yang belum ditanyakan', 'jawaban sebelumnya beserta evaluasinya', 'skor indikasi dan dukungan saat ini', 'sisa kuota pertanyaan'],
-  draft: ['kode, nama, dan kategori tindakan', 'jenis rawat (bila diminta dari klaim)', 'isi kamus pengalaman'],
+  next: [
+    'konteks klaim yang sama',
+    'pertanyaan putaran yang belum ditanyakan',
+    'jawaban sebelumnya beserta evaluasinya (kekuatan bukti, skor fraud pilihan, bobot)',
+    'skor indikasi fraud, dukungan, dan tingkat indikasi saat ini',
+    'ambang indikasi sedang dan tinggi dari konfigurasi',
+    'sisa kuota pertanyaan',
+  ],
+  draft: ['kode, nama, dan kategori tindakan', 'konteks klaim yang sama (bila diminta dari klaim)', 'hasil pemetaan kamus untuk baris tindakan itu', 'isi kamus pengalaman beserta pilihan jawaban dan skor fraudnya'],
 };
 
 /** The entry facts a question is ranked on. */
@@ -67,6 +75,7 @@ export interface PoolItem extends RankCandidate {
   priorConfidence: number | null;
 }
 
+/** One answer of the session so far, with the rule-based evaluation of the option that was chosen. */
 export interface HistoryItem {
   questionId: string;
   version: number;
@@ -75,6 +84,10 @@ export interface HistoryItem {
   strength: Strength;
   definite: boolean;
   denial: boolean;
+  /** Fraud score of the chosen option as it applied to the claim. */
+  fraudScore: number;
+  /** What the answer added to the fraud indication. */
+  indicationWeight: number;
 }
 
 /** Asks for the next question of an adaptive session, after the previous answer has been evaluated. */
@@ -83,7 +96,10 @@ export interface NextQuestionRequest {
   sessionKey: string;
   pool: PoolItem[];
   history: HistoryItem[];
+  /** Scores after the latest answer, with the level the system read from `thresholds`. */
   scores: VerificationScores;
+  /** The session's configured fraud thresholds, so the AI reasons with the same numbers as the stop rule. */
+  thresholds: FraudThresholds;
   /** Questions that may still be asked before the configured limit. */
   remaining: number;
 }
@@ -95,12 +111,30 @@ export interface NextQuestionResponse {
   skipped: { questionId: string; reason: string }[];
 }
 
+/** What the earlier steps found for the claim line a draft is asked for: its dictionary mapping. */
+export interface DraftAnalysis {
+  lineId: string;
+  matchType: MatchType;
+  relevance: number;
+  status: MappingStatus;
+  /** The entry the mapping matched, possibly one for another code; null when none matched. */
+  matchedEntryId: string | null;
+}
+
+/** A dictionary entry with the answer options (and fraud scores) of its current question; empty when it has none. */
+export interface DraftReference {
+  entry: DictionaryEntry;
+  options: readonly AnswerOption[];
+}
+
 export interface DraftRequest {
   target: { code: string; name: string; category: string };
   /** Present when the draft is asked for from a claim. */
-  claim: Pick<ClaimContext, 'careType'> | null;
-  /** Existing dictionary entries the drafter may use as references for structure and wording. */
-  dictionary: readonly DictionaryEntry[];
+  claim: ClaimContext | null;
+  /** The mapping of the target line on that claim; null when the draft is not asked for from a claim. */
+  analysis: DraftAnalysis | null;
+  /** Existing dictionary entries with their current answer options, as references for structure, wording and option scores. */
+  dictionary: readonly DraftReference[];
   /** 0 for the first draft; regenerating asks for the next variant. */
   variant: number;
 }
@@ -121,7 +155,10 @@ export interface QuestionAi {
   rank(request: RankRequest): Promise<RankedQuestion[]>;
   /** Picks the next question of a session from the approved round, given the answers so far. */
   next(request: NextQuestionRequest): Promise<NextQuestionResponse>;
-  /** Drafts a participant question and answer options for a service the dictionary does not cover. */
+  /**
+   * Drafts a participant question and answer options, each option with its own fraud score, for a
+   * service the dictionary does not cover, from the claim context and the mapping analysis of that line.
+   */
   draft(request: DraftRequest): Promise<DraftResponse>;
 }
 

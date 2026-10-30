@@ -1,4 +1,7 @@
+import { optionScoreProblem } from './checks';
+import { claimedNights } from './evidence';
 import type { Db } from './types';
+import { appliedFraudScore, fraudLevel, thresholdsOf } from './verification';
 
 /**
  * Referential integrity of the shared database: every reference resolves, published questions and
@@ -66,6 +69,10 @@ export function checkIntegrity(db: Db): string[] {
     q.versions.forEach((v, i) => {
       if (v.version !== i + 1) fail(`Pertanyaan ${q.id}: nomor versi tidak berurutan`);
       if (new Set(v.options.map((o) => o.id)).size !== v.options.length) fail(`Pertanyaan ${q.id} v${v.version}: ID pilihan ganda`);
+      for (const o of v.options) {
+        const problem = optionScoreProblem(o);
+        if (problem) fail(`Pertanyaan ${q.id} v${v.version}: skor fraud pilihan ${o.id} ${problem}`);
+      }
     });
   }
 
@@ -144,6 +151,14 @@ export function checkIntegrity(db: Db): string[] {
     if (new Set(own.map((x) => x.questionId)).size !== own.length) fail(`Sesi ${s.id}: pertanyaan yang sama dijawab dua kali`);
     if (s.pending && s.pending.iteration !== own.length + 1) fail(`Sesi ${s.id}: iterasi pertanyaan aktif tidak berurutan`);
     for (const k of s.skipped) if (own.some((x) => x.questionId === k.questionId)) fail(`Sesi ${s.id}: ${k.questionId} dilewati sekaligus dijawab`);
+    // Levels are read once, with the thresholds the session ran under; a TINGGI level always ends the session there.
+    const cfg = s.aiConfigVersion === db.aiConfig.version ? db.aiConfig : db.aiConfigHistory.find((c) => c.version === s.aiConfigVersion);
+    if (!cfg) fail(`Sesi ${s.id}: versi konfigurasi ${s.aiConfigVersion} tidak ada`);
+    own.forEach((x, i) => {
+      if (cfg && x.scoresAfter.level !== fraudLevel(x.scoresAfter.indication, thresholdsOf(cfg))) fail(`Jawaban ${x.id}: tingkat indikasi tidak sesuai ambang sesi`);
+      if (x.scoresAfter.level === 'TINGGI' && (i < own.length - 1 || s.status !== 'SELESAI' || s.stopReason !== 'INDIKASI_TINGGI')) fail(`Sesi ${s.id}: tidak berhenti pada indikasi tinggi`);
+    });
+    if (s.stopReason === 'INDIKASI_TINGGI' && own.at(-1)?.scoresAfter.level !== 'TINGGI') fail(`Sesi ${s.id}: berhenti karena indikasi tinggi tanpa jawaban bertingkat tinggi`);
   }
 
   for (const ans of db.answers) {
@@ -153,9 +168,12 @@ export function checkIntegrity(db: Db): string[] {
       fail(`Jawaban ${ans.id}: ${ans.questionId} v${ans.questionVersion} tidak diterbitkan di ${ans.assignmentId}`);
     }
     const version = questionById.get(ans.questionId)?.versions.find((v) => v.version === ans.questionVersion);
-    if (!version?.options.some((o) => o.id === ans.optionId)) fail(`Jawaban ${ans.id}: pilihan ${ans.optionId} tidak ada`);
+    const option = version?.options.find((o) => o.id === ans.optionId);
+    if (!option) fail(`Jawaban ${ans.id}: pilihan ${ans.optionId} tidak ada`);
+    const claim = claimById.get(ans.claimId);
+    if (option && claim && ans.evaluation.fraudScore !== appliedFraudScore(option, claimedNights(claim))) fail(`Jawaban ${ans.id}: skor fraud bukan milik pilihan yang dipilih`);
     const sc = ans.scoresAfter;
-    if (![sc.indication, sc.support, ans.evaluation.reliability, ans.pick.predictedDefinite].every((x) => x >= 0 && x <= 1)) fail(`Jawaban ${ans.id}: skor di luar 0–1`);
+    if (![sc.indication, sc.support, ans.evaluation.reliability, ans.evaluation.fraudScore, ans.pick.predictedDefinite].every((x) => x >= 0 && x <= 1)) fail(`Jawaban ${ans.id}: skor di luar 0–1`);
     if (sc.indication === 1 && !db.answers.some((x) => x.sessionId === ans.sessionId && x.iteration <= ans.iteration && x.evaluation.denial)) fail(`Jawaban ${ans.id}: indikasi 1 tanpa penyangkalan`);
   }
   return problems;

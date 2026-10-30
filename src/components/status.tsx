@@ -4,6 +4,7 @@ import {
   CLAIM_STATUS_LABEL,
   DECISION_LABEL,
   EVIDENCE_STATUS_LABEL,
+  FRAUD_LEVEL_LABEL,
   MAPPING_STATUS_LABEL,
   ORIGIN_LABEL,
   PARTICIPANT_STATUS_LABEL,
@@ -11,8 +12,9 @@ import {
   SCORE_DISCLAIMER,
   STRENGTH_LABEL,
 } from '../domain/labels';
-import type { ClaimStatus, DecisionOutcome, MappingStatus, QuestionOrigin, Strength } from '../domain/types';
+import type { ClaimStatus, DecisionOutcome, FraudLevel, MappingStatus, QuestionOrigin, Strength } from '../domain/types';
 import { formatScore } from '../lib/format';
+import { cx } from './styles';
 import { Badge, type Tone } from './ui';
 
 const CLAIM_TONE: Record<ClaimStatus, Tone> = {
@@ -31,14 +33,14 @@ export function ClaimStatusBadge({ status, view = 'verifier' }: { status: ClaimS
   return <Badge tone={tone}>{label}</Badge>;
 }
 
-export function EvidenceBadge({ status, priority }: { status: EvidenceStatus; priority?: boolean }) {
+export function EvidenceBadge({ status, denied }: { status: EvidenceStatus; denied?: boolean }) {
   const Icon = status === 'PERLU_DIPERIKSA' ? AlertOctagon : status === 'KONSISTEN' ? CheckCircle2 : HelpCircle;
   const tone: Tone = status === 'PERLU_DIPERIKSA' ? 'bad' : status === 'KONSISTEN' ? 'good' : 'neutral';
   return (
     <Badge tone={tone}>
       <Icon className="h-3 w-3" aria-hidden />
       {EVIDENCE_STATUS_LABEL[status]}
-      {priority && ' · penyangkalan'}
+      {denied && ' · penyangkalan'}
     </Badge>
   );
 }
@@ -87,12 +89,23 @@ export function ConfidencePill({ value, below }: { value: number | null; below?:
   );
 }
 
-/** Claim-level inconsistency indication from the participant's answers (rule-based, not a fraud probability). */
-export function IndicationBadge({ value, threshold }: { value: number; threshold: number }) {
-  const tone: Tone = value >= threshold ? 'bad' : value > 0 ? 'warn' : 'neutral';
+const LEVEL_TONE: Record<FraudLevel, Tone> = { RENDAH: 'neutral', SEDANG: 'warn', TINGGI: 'bad' };
+
+/** Claim-level fraud indication and its level, as stored with the last answer (rule-based, not a validated fraud probability). */
+export function FraudLevelBadge({ value, level }: { value: number; level: FraudLevel }) {
   return (
-    <Badge tone={tone} title={SCORE_DISCLAIMER}>
-      Indikasi <span className="tabular">{formatScore(value)}</span>
+    <Badge tone={LEVEL_TONE[level]} title={SCORE_DISCLAIMER}>
+      {FRAUD_LEVEL_LABEL[level]} <span className="tabular">{formatScore(value)}</span>
     </Badge>
+  );
+}
+
+/** One option's fraud score, shown to the verifier next to its Table 1 strength (never to the participant). */
+export function FraudScoreTag({ value, conditional }: { value: number; conditional?: boolean }) {
+  return (
+    <span className={cx('tabular text-[10px]', value > 0 ? 'text-red-700' : 'text-slate-400')} title={conditional ? 'Skor fraud berlaku bila jumlah malam klaim di luar rentang ini' : 'Skor fraud pilihan ini'}>
+      fraud {formatScore(value)}
+      {conditional && value > 0 && '*'}
+    </span>
   );
 }

@@ -92,6 +92,8 @@ export interface DecisionBasis {
   sessionId: string | null;
   evidenceStatus: 'PERLU_DIPERIKSA' | 'BUKTI_TIDAK_CUKUP' | 'KONSISTEN' | 'TANPA_JAWABAN';
   indication: number | null;
+  /** The fraud indication level the verifier saw, read against the session's thresholds. */
+  level: FraudLevel | null;
   support: number | null;
   stopReason: StopReason | null;
   answered: number;
@@ -174,6 +176,12 @@ export interface AnswerOption {
   id: string;
   label: string;
   mapping: OptionMapping;
+  /**
+   * 0–1: fraud confidence carried by choosing this option, set per option by the dictionary panel, the AI
+   * draft or the verifier (never per question). A night range carries it only when the billed nights fall
+   * outside the range. The rules it must follow are in `optionScoreProblem` (domain/checks).
+   */
+  fraudScore: number;
   /** "Tidak ingat": never counts as a rebuttal. */
   unsure?: boolean;
   /** Participant says they were never there; the remaining questions are skipped. */
@@ -365,8 +373,8 @@ export interface FristaCheck {
 
 /** Why the system stopped asking. Recorded once, when the session ends. */
 export type StopReason =
-  /** The inconsistency indication reached the configured stop threshold (1,00 = participant denied ever being there). */
-  | 'INDIKASI_MAKSIMUM'
+  /** The fraud indication reached the configured high threshold (`AiConfig.fraudHighThreshold`). */
+  | 'INDIKASI_TINGGI'
   /** As many questions were asked as the configuration allows. */
   | 'BATAS_PERTANYAAN'
   /** No relevant question was left in the round. */
@@ -425,7 +433,9 @@ export interface AnswerEvaluation {
   definite: boolean;
   denial: boolean;
   reliability: number;
-  /** Contribution to the inconsistency indication (0–1; 1 for a denial). */
+  /** Fraud score of the chosen option as it applies to this claim (0 for a night range the billed stay falls in). */
+  fraudScore: number;
+  /** Contribution to the fraud indication: reliability × `fraudScore` (0–1; 1 for a denial). */
   indicationWeight: number;
   /** Contribution to the support score (0–1). */
   supportWeight: number;
@@ -433,15 +443,23 @@ export interface AnswerEvaluation {
 }
 
 /**
- * Claim-level scores after an answer. `indication` combines contradicting answers (noisy-OR of their
- * weights) and reaches 1 only through a denial; `support` does the same for supporting answers. Both are
- * rule-based simulation scores, not validated fraud probabilities.
+ * How strong the fraud indication is, read against `AiConfig.fraudMediumThreshold` / `fraudHighThreshold`.
+ * RENDAH: keep asking. SEDANG: keep asking, with questions that confirm. TINGGI: stop and review first.
+ */
+export type FraudLevel = 'RENDAH' | 'SEDANG' | 'TINGGI';
+
+/**
+ * Claim-level scores after an answer. `indication` is the fraud signal: noisy-OR of the answers'
+ * `indicationWeight`, reaching 1 only through a denial; `support` does the same for supporting answers.
+ * `level` reads `indication` against the session's configured thresholds. Rule-based simulation scores,
+ * not validated fraud probabilities.
  */
 export interface VerificationScores {
   indication: number;
   support: number;
   answered: number;
   definite: number;
+  level: FraudLevel;
 }
 
 export interface Answer {
@@ -472,8 +490,10 @@ export interface AiConfig {
   autoSelectThreshold: number;
   /** Maximum questions asked per claim in one session (and preselected for the verifier). */
   maxQuestions: number;
-  /** The session stops once the inconsistency indication reaches this (1 = only a denial stops it). */
-  stopIndicationThreshold: number;
+  /** Fraud indication at or above this reads SEDANG: the session goes on with confirming questions. */
+  fraudMediumThreshold: number;
+  /** Fraud indication at or above this reads TINGGI: the session stops (1 = only a denial reaches it). */
+  fraudHighThreshold: number;
   /** AI drafts below this confidence carry a warning. */
   draftWarningThreshold: number;
   updatedAt: Iso;
@@ -491,7 +511,7 @@ export interface AuditEntry {
   summary: string;
 }
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 export interface Db {
   schemaVersion: typeof SCHEMA_VERSION;

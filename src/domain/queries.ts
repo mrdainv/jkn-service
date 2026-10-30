@@ -184,9 +184,9 @@ export interface ClaimEvidence {
   session: ResponseSession | undefined;
   /** Asked questions in the order they were asked, then the current one, then the rest of the round. */
   rows: EvidenceRow[];
-  /** Scores after the latest answer (all zero before the first). */
+  /** Scores and fraud level after the latest answer (all zero, RENDAH, before the first). */
   scores: VerificationScores;
-  /** Table 2 for the claim, once the session has ended with at least one answer. */
+  /** Table 2 for the claim, read through the session's thresholds, once the session has ended with at least one answer. */
   result: EvidenceResult | null;
   denied: boolean;
 }
@@ -226,8 +226,9 @@ export function claimEvidence(db: Db, claim: Claim): ClaimEvidence | null {
     })
     .sort((a, b) => rank(a) - rank(b) || (a.answer && b.answer ? a.answer.iteration - b.answer.iteration : a.order - b.order));
   const denied = answers.some((a) => a.evaluation.denial);
-  const result = ended && answers.length ? evidenceStatus({ denied, strengths: answers.map((a) => a.evaluation.strength) }) : null;
-  return { assignment, session, rows, scores: answers.at(-1)?.scoresAfter ?? EMPTY_SCORES, result, denied };
+  const scores = answers.at(-1)?.scoresAfter ?? EMPTY_SCORES;
+  const result = ended && answers.length ? evidenceStatus({ level: scores.level, supported: scores.support > 0 }) : null;
+  return { assignment, session, rows, scores, result, denied };
 }
 
 function rank(row: EvidenceRow): number {

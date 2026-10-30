@@ -1,6 +1,5 @@
 import type { NextQuestionRequest, NextQuestionResponse, QuestionAi, RankRequest, RankedQuestion } from '../ai/service';
 import type { DbStore } from '../data/store';
-import { getClaim } from '../domain/queries';
 import type { ActorRef, AiDraft, Db, DecisionOutcome, DraftProposal, FristaResult, SelectionItem } from '../domain/types';
 import * as cmd from './commands';
 
@@ -60,14 +59,7 @@ export function createActions(store: DbStore, ai: QuestionAi, clock: () => strin
   }
 
   async function draftFor(claimId: string | null, target: AiDraft['target'], variant: number, previousDraftId: string | null, actor: ActorRef) {
-    const db = snapshot();
-    const claim = claimId ? getClaim(db, claimId) : null;
-    const response = await ai.draft({
-      target,
-      claim: claim ? { careType: claim.careType } : null,
-      dictionary: db.dictionary,
-      variant,
-    });
+    const response = await ai.draft(cmd.draftRequestFor(snapshot(), claimId, target, variant));
     return store.transact((d) => cmd.recordDraft(d, { claimId, target, response, variant, previousDraftId, model }, ctx(actor)));
   }
 

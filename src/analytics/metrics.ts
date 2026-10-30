@@ -1,7 +1,7 @@
 import { findProcedure } from '../ai/reference';
 import { type EvidenceStatus } from '../domain/evidence';
 import { claimEvidence, getEntry, getQuestion, getVersion, sessionFor, answersOf } from '../domain/queries';
-import type { ClaimStatus, Db, DecisionOutcome, QuestionOrigin, StopReason, Strength } from '../domain/types';
+import type { ClaimStatus, Db, DecisionOutcome, FraudLevel, QuestionOrigin, StopReason, Strength } from '../domain/types';
 import { ageOn } from '../lib/format';
 import { brier, describe, ece, spearman, wilson, type Correlation, type Describe, type Proportion } from './stats';
 
@@ -413,7 +413,8 @@ export function computeAnalytics(db: Db, now: string = new Date().toISOString())
     stopReasons,
     indication: describe(finalScores.map((x) => x.indication)),
     support: describe(finalScores.map((x) => x.support)),
-    reachedStop: finalScores.filter((x) => x.indication >= 1).length,
+    // The level stored with the last answer, read with the thresholds each session ran under.
+    finalLevels: finalScores.reduce<Record<FraudLevel, number>>((m, x) => ({ ...m, [x.level]: m[x.level] + 1 }), { RENDAH: 0, SEDANG: 0, TINGGI: 0 }),
     skippedIrrelevant: db.sessions.reduce((n, x) => n + x.skipped.length, 0),
   };
 

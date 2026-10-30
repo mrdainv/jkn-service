@@ -1,12 +1,12 @@
 import { Inbox } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { useDb } from '../../application/context';
-import { claimEvidence, configAt } from '../../domain/queries';
+import { claimEvidence } from '../../domain/queries';
 import type { Claim, ClaimStatus } from '../../domain/types';
 import { formatDate, formatDateTime } from '../../lib/format';
 import { href, navigate } from '../../lib/router';
 import { usePref } from '../../lib/viewer';
-import { ClaimStatusBadge, EvidenceBadge, IndicationBadge } from '../status';
+import { ClaimStatusBadge, EvidenceBadge, FraudLevelBadge } from '../status';
 import { Badge, Card, Empty, PageHeader } from '../ui';
 import { cx, inputCls, td, th } from '../styles';
 
@@ -38,7 +38,7 @@ export function ClaimQueue() {
       })
       .filter(({ c, participant }) => !needle || c.id.toLowerCase().includes(needle) || c.sepNumber.toLowerCase().includes(needle) || participant.name.toLowerCase().includes(needle) || c.diagnosis.code.toLowerCase().includes(needle))
       .sort((a, b) => {
-        // Denials first, then the highest inconsistency indication, then the oldest waiting claim.
+        // TINGGI fraud level first (every denial reaches it), then the highest indication, then the oldest waiting claim.
         const pa = a.evidence?.result?.priority ? 0 : 1;
         const pb = b.evidence?.result?.priority ? 0 : 1;
         if (pa !== pb && group !== 'selesai') return pa - pb;
@@ -108,8 +108,6 @@ export function ClaimQueue() {
 }
 
 function ClaimRow({ c, name, facility, mapped, lines, evidence }: { c: Claim; name: string; facility: string; mapped: number; lines: number; evidence: ReturnType<typeof claimEvidence> }) {
-  const db = useDb();
-  const threshold = (version: number) => configAt(db, version).stopIndicationThreshold;
   return (
     <tr className="cursor-pointer hover:bg-slate-50" onClick={() => navigate(`/verifikator/klaim/${c.id}`)}>
       <td className={td}>
@@ -140,8 +138,8 @@ function ClaimRow({ c, name, facility, mapped, lines, evidence }: { c: Claim; na
       <td className={td}>
         {evidence?.result && evidence.session ? (
           <span className="flex flex-wrap gap-1">
-            <EvidenceBadge status={evidence.result.status} priority={evidence.result.priority} />
-            <IndicationBadge value={evidence.scores.indication} threshold={threshold(evidence.session.aiConfigVersion)} />
+            <EvidenceBadge status={evidence.result.status} denied={evidence.denied} />
+            <FraudLevelBadge value={evidence.scores.indication} level={evidence.scores.level} />
           </span>
         ) : evidence?.session?.status === 'BERLANGSUNG' ? (
           <span className="text-xs text-sky-700">sedang menjawab ({evidence.scores.answered})</span>

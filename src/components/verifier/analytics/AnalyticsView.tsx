@@ -407,7 +407,11 @@ export function AnalyticsView() {
               value={a.adaptive.asked.median === null ? '–' : formatNumber(a.adaptive.asked.median, 1)}
               sub={`dari median ${a.adaptive.roundSize.median === null ? '–' : formatNumber(a.adaptive.roundSize.median, 1)} yang disetujui`}
             />
-            <Stat label="Berhenti karena indikasi maksimum" value={a.adaptive.stopReasons.INDIKASI_MAKSIMUM ?? 0} sub={`${a.adaptive.reachedStop} sesi dengan indikasi 1,00`} />
+            <Stat
+              label="Berhenti karena indikasi tinggi"
+              value={a.adaptive.stopReasons.INDIKASI_TINGGI ?? 0}
+              sub={`tingkat akhir: ${a.adaptive.finalLevels.TINGGI} tinggi, ${a.adaptive.finalLevels.SEDANG} sedang, ${a.adaptive.finalLevels.RENDAH} rendah`}
+            />
             <Stat label="Pertanyaan dilewati AI" value={a.adaptive.skippedIrrelevant} sub="tidak relevan setelah jawaban sebelumnya" />
             <Stat label="Median indikasi akhir" value={formatScore(a.adaptive.indication.median)} sub={`median dukungan ${formatScore(a.adaptive.support.median)}`} />
           </div>

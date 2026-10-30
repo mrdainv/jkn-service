@@ -1,4 +1,4 @@
-import type { AnswerOption, Claim, Strength } from './types';
+import type { AnswerOption, Claim, FraudLevel, Strength } from './types';
 
 /** Case-level reading of the answers (URD Table 2). It orders the verifier's work; it is not a decision. */
 export type EvidenceStatus = 'PERLU_DIPERIKSA' | 'BUKTI_TIDAK_CUKUP' | 'KONSISTEN';
@@ -23,29 +23,35 @@ export function strengthOf(option: AnswerOption, nights: number | null): Strengt
 }
 
 export interface EvidenceInput {
-  strengths: readonly Strength[];
-  denied: boolean;
+  /** Fraud level after the last answer, already read against the session's thresholds. */
+  level: FraudLevel;
+  /** Whether any answer supports the claim (support score above 0). */
+  supported: boolean;
 }
 
 export interface EvidenceResult {
   status: EvidenceStatus;
-  /** A denial ("never went there") goes to the top of the verifier's list. */
+  /** A TINGGI level (every denial reaches it) goes to the top of the verifier's list. */
   priority: boolean;
   /** Which Table 2 row decided. */
   rule: 1 | 2 | 3 | 4;
 }
 
-/** Table 2: four ordered conditions; the first that holds decides. */
+/**
+ * Table 2, read through the configured thresholds: four ordered conditions; the first that holds
+ * decides. The level is the only input about contradictions, so the result never disagrees with the
+ * stop rule or with the score the verifier sees.
+ */
 export function evidenceStatus(input: EvidenceInput): EvidenceResult {
-  if (input.denied) return { status: 'PERLU_DIPERIKSA', priority: true, rule: 1 };
-  if (input.strengths.some((s) => s === 'BERTENTANGAN')) return { status: 'PERLU_DIPERIKSA', priority: false, rule: 2 };
-  if (input.strengths.every((s) => s === 'NETRAL')) return { status: 'BUKTI_TIDAK_CUKUP', priority: false, rule: 3 };
+  if (input.level === 'TINGGI') return { status: 'PERLU_DIPERIKSA', priority: true, rule: 1 };
+  if (input.level === 'SEDANG') return { status: 'PERLU_DIPERIKSA', priority: false, rule: 2 };
+  if (!input.supported) return { status: 'BUKTI_TIDAK_CUKUP', priority: false, rule: 3 };
   return { status: 'KONSISTEN', priority: false, rule: 4 };
 }
 
 export const EVIDENCE_RULE_TEXT: Record<EvidenceResult['rule'], string> = {
-  1: 'Peserta menyatakan tidak pernah ke faskes tersebut.',
-  2: 'Setidaknya satu jawaban bertentangan dengan isi klaim.',
-  3: 'Semua jawaban netral ("Tidak ingat") atau tidak ada jawaban.',
-  4: 'Tidak ada jawaban yang bertentangan dan setidaknya satu mendukung.',
+  1: 'Indikasi fraud mencapai ambang tinggi (termasuk penyangkalan "tidak pernah ke sana").',
+  2: 'Indikasi fraud mencapai ambang sedang.',
+  3: 'Indikasi di bawah ambang sedang, tetapi tidak ada jawaban yang mendukung isi klaim (mis. semua "Tidak ingat").',
+  4: 'Indikasi di bawah ambang sedang dan setidaknya satu jawaban mendukung isi klaim.',
 };

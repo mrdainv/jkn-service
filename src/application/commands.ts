@@ -1,9 +1,9 @@
-import type { ClaimContext, DraftResponse, HistoryItem, NextQuestionRequest, NextQuestionResponse, PoolItem, RankRequest, RankedQuestion } from '../ai/service';
+import type { ClaimContext, DraftRequest, DraftResponse, HistoryItem, NextQuestionRequest, NextQuestionResponse, PoolItem, RankRequest, RankedQuestion } from '../ai/service';
 import { checkQuestion } from '../domain/checks';
 import { claimedNights } from '../domain/evidence';
-import { STOP_REASON_LABEL } from '../domain/labels';
+import { FRAUD_LEVEL_LABEL, STOP_REASON_LABEL } from '../domain/labels';
 import { bestMatch, episodeEntry, episodeTopicsFor, mappingStatus } from '../domain/mapping';
-import { combineScores, EMPTY_SCORES, evaluateAnswer, stopAfterAnswer } from '../domain/verification';
+import { combineScores, EMPTY_SCORES, evaluateAnswer, stopAfterAnswer, thresholdsOf } from '../domain/verification';
 import {
   answersOf,
   assignmentsOf,
@@ -287,6 +287,30 @@ export function rankRequestFor(claim: Claim, candidates: readonly Candidate[]): 
   };
 }
 
+/**
+ * What the AI drafts from: the target, the claim context and the mapping analysis of the target line
+ * (when asked from a claim), and the active dictionary with each entry's current options and scores.
+ */
+export function draftRequestFor(db: Db, claimId: string | null, target: AiDraft['target'], variant: number): DraftRequest {
+  const claim = claimId ? getClaim(db, claimId) : null;
+  const mapping = claim ? db.mappings.find((m) => m.claimId === claim.id && m.target.kind === 'PROSEDUR' && m.target.code === target.code) : undefined;
+  return {
+    target,
+    claim: claim ? claimContextFor(claim) : null,
+    analysis:
+      mapping?.target.kind === 'PROSEDUR'
+        ? { lineId: mapping.target.lineId, matchType: mapping.matchType, relevance: mapping.relevance, status: mapping.status, matchedEntryId: mapping.entryId }
+        : null,
+    dictionary: db.dictionary
+      .filter((e) => e.status === 'AKTIF')
+      .map((entry) => {
+        const question = questionForEntry(db, entry.id);
+        return { entry, options: question ? currentVersion(question).options : [] };
+      }),
+    variant,
+  };
+}
+
 function episodeOrder(entry: DictionaryEntry): number {
   return entry.topic === 'KEBERADAAN' ? 0 : entry.topic === 'LAMA_RAWAT' ? 1 : 2;
 }
@@ -395,7 +419,7 @@ export function isLocked(db: Db, claim: Claim): boolean {
 }
 
 function sanitizeOptions(options: readonly AnswerOption[]): AnswerOption[] {
-  return options.map((o) => ({ ...o, label: o.label.trim() }));
+  return options.map((o) => ({ ...o, label: o.label.trim(), fraudScore: Math.round(o.fraudScore * 100) / 100 }));
 }
 
 /** Saves the verifier's working selection without publishing anything to the participant. */
@@ -683,15 +707,16 @@ export function approveDraft(db: Db, draftId: string, ctx: Ctx, ai: AiPort, mode
 
 // ── Verifier: configuration and decision ────────────────────────────────────
 
-export type AiConfigPatch = Partial<Pick<AiConfig, 'mappingThreshold' | 'autoSelectThreshold' | 'maxQuestions' | 'draftWarningThreshold' | 'stopIndicationThreshold'>>;
+export type AiConfigPatch = Partial<Pick<AiConfig, 'mappingThreshold' | 'autoSelectThreshold' | 'maxQuestions' | 'draftWarningThreshold' | 'fraudMediumThreshold' | 'fraudHighThreshold'>>;
 
 export function updateAiConfig(db: Db, patch: AiConfigPatch, ctx: Ctx): AiConfig {
   const next: AiConfig = { ...db.aiConfig, ...patch, version: db.aiConfig.version + 1, updatedAt: ctx.now, updatedBy: ctx.actor };
   if (!inUnit(next.mappingThreshold) || !inUnit(next.autoSelectThreshold) || !inUnit(next.draftWarningThreshold)) {
     throw new CommandError('INVALID_CONFIG', 'Ambang harus di antara 0 dan 1.');
   }
-  if (!Number.isFinite(next.stopIndicationThreshold) || next.stopIndicationThreshold < 0.5 || next.stopIndicationThreshold > 1) {
-    throw new CommandError('INVALID_CONFIG', 'Ambang berhenti indikasi harus di antara 0,5 dan 1.');
+  // Above 0 so no answer reads SEDANG by itself; below the high threshold so the three levels stay ordered.
+  if (!inUnit(next.fraudMediumThreshold) || !inUnit(next.fraudHighThreshold) || next.fraudMediumThreshold <= 0 || next.fraudMediumThreshold >= next.fraudHighThreshold) {
+    throw new CommandError('INVALID_CONFIG', 'Ambang indikasi fraud: 0 < sedang < tinggi ≤ 1.');
   }
   if (!Number.isInteger(next.maxQuestions) || next.maxQuestions < 1 || next.maxQuestions > 8) {
     throw new CommandError('INVALID_CONFIG', 'Jumlah pertanyaan maksimal 1–8.');
@@ -711,6 +736,7 @@ export function decisionBasis(db: Db, claim: Claim): DecisionBasis {
     sessionId: ev?.session?.id ?? null,
     evidenceStatus: ev?.result?.status ?? 'TANPA_JAWABAN',
     indication: answered ? ev!.scores.indication : null,
+    level: answered ? ev!.scores.level : null,
     support: answered ? ev!.scores.support : null,
     stopReason: ev?.session?.stopReason ?? null,
     answered,
@@ -819,12 +845,15 @@ function historyItem(db: Db, claim: Claim, answer: Answer): HistoryItem {
     strength: answer.evaluation.strength,
     definite: answer.evaluation.definite,
     denial: answer.evaluation.denial,
+    fraudScore: answer.evaluation.fraudScore,
+    indicationWeight: answer.evaluation.indicationWeight,
   };
 }
 
 /**
- * One step of the adaptive loop, after the latest answer has been evaluated: stop if a stop rule holds,
- * otherwise ask the AI for the next question of the round and show exactly that one.
+ * One step of the adaptive loop, after the latest answer has been evaluated: stop if the evaluation
+ * result says so (TINGGI level, or the question limit), otherwise ask the AI for the next question of the
+ * round, telling it the level and the configured thresholds, and show exactly that one.
  */
 function advance(db: Db, session: ResponseSession, assignment: Assignment, claim: Claim, ctx: Ctx, ai: AiPort, model: AiModel) {
   // The session keeps the configuration it started under, even if the configuration changes meanwhile.
@@ -843,6 +872,7 @@ function advance(db: Db, session: ResponseSession, assignment: Assignment, claim
     pool: pool.map((i) => poolItem(db, claim, i)),
     history: answers.map((a) => historyItem(db, claim, a)),
     scores,
+    thresholds: thresholdsOf(cfg),
     remaining: cfg.maxQuestions - answers.length,
   });
   const aiCtx = { now: ctx.now, actor: aiActor(model) };
@@ -906,7 +936,8 @@ function finishSession(
     receipt.readAt = ctx.now;
   }
   const last = answers.reduce<Answer | undefined>((a, b) => (!a || b.iteration > a.iteration ? b : a), undefined);
-  audit(db, ctx, 'SESI_SELESAI', 'ResponseSession', session.id, claim.id, `${STOP_REASON_LABEL[reason]}; ${answers.length} jawaban, indikasi ${last?.scoresAfter.indication ?? 0}, dukungan ${last?.scoresAfter.support ?? 0}`);
+  const scores = last?.scoresAfter ?? EMPTY_SCORES;
+  audit(db, ctx, 'SESI_SELESAI', 'ResponseSession', session.id, claim.id, `${STOP_REASON_LABEL[reason]}; ${answers.length} jawaban, indikasi ${scores.indication} (${FRAUD_LEVEL_LABEL[scores.level].toLowerCase()}), dukungan ${scores.support}`);
 }
 
 /** Participant chooses not to answer (before starting) or to stop (after some answers). */
@@ -931,9 +962,10 @@ export interface AnswerInput {
 }
 
 /**
- * Records the answer to the question on screen, evaluates it (rule-based, Table 1 plus weights), updates
- * the claim scores, then either stops or has the AI pick the next question, all in one write. Rejects
- * answers to anything but the current question of the participant's own open session.
+ * Records the answer to the question on screen, evaluates it (rule-based: the chosen option's fraud score
+ * weighted by reliability), updates the claim scores and reads their level against the session's
+ * thresholds, then either stops or has the AI pick the next question, all in one write. Rejects answers to
+ * anything but the current question of the participant's own open session.
  */
 export function answerQuestion(db: Db, input: AnswerInput, ctx: Ctx, ai: AiPort, model: AiModel): Answer {
   const session = db.sessions.find((s) => s.id === input.sessionId);
@@ -963,11 +995,11 @@ export function answerQuestion(db: Db, input: AnswerInput, ctx: Ctx, ai: AiPort,
     answeredAt: ctx.now,
     pick: pending.pick,
     evaluation,
-    scoresAfter: combineScores([...previous, evaluation]),
+    scoresAfter: combineScores([...previous, evaluation], thresholdsOf(configAt(db, session.aiConfigVersion))),
   };
   db.answers.push(answer);
   session.pending = null;
-  audit(db, ctx, 'JAWABAN_DICATAT', 'Answer', answer.id, claim.id, `#${answer.iteration} ${answer.questionId} v${answer.questionVersion}: ${evaluation.strength}${evaluation.definite ? '' : ' (tidak ingat)'}; indikasi ${answer.scoresAfter.indication}`);
+  audit(db, ctx, 'JAWABAN_DICATAT', 'Answer', answer.id, claim.id, `#${answer.iteration} ${answer.questionId} v${answer.questionVersion}: ${evaluation.strength}${evaluation.definite ? '' : ' (tidak ingat)'}, skor fraud ${evaluation.fraudScore}; indikasi ${answer.scoresAfter.indication} (${FRAUD_LEVEL_LABEL[answer.scoresAfter.level].toLowerCase()})`);
   advance(db, session, assignment, claim, ctx, ai, model);
   return answer;
 }

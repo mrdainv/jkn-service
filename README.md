@@ -1,6 +1,6 @@
 # JKN Service: Verifikasi Klaim dengan Suara Peserta
 
-Simulasi end-to-end verifikasi klaim BPJS Kesehatan (Healthkathon BPJS Kesehatan 2026). Faskes mengajukan klaim, verifikator BPJS menyetujui pertanyaan dari **kamus pengalaman**, lalu peserta JKN ditanya **satu pertanyaan per langkah**: setiap jawaban dievaluasi, skor diperbarui, dan AI memilih pertanyaan berikutnya atau berhenti. Keputusan tetap di tangan verifikator. Ketiga peran memakai catatan yang sama.
+Simulasi end-to-end verifikasi klaim BPJS Kesehatan (Healthkathon BPJS Kesehatan 2026). Faskes mengajukan klaim, verifikator BPJS menyetujui pertanyaan pilihan ganda dari **kamus pengalaman** (atau draf AI), lalu peserta JKN ditanya **satu pertanyaan per langkah**: skor fraud pilihan yang dipilih dievaluasi, indikasi fraud diperbarui dan dibaca terhadap ambang di konfigurasi, lalu AI memilih pertanyaan berikutnya atau sesi berhenti. Keputusan tetap di tangan verifikator. Ketiga peran memakai catatan yang sama.
 
 > **Semua data adalah simulasi.** Tidak ada koneksi ke sistem BPJS, FRISTA, atau layanan AI sungguhan. AI dan FRISTA disimulasikan secara deterministik dan diberi label di setiap layar.
 
@@ -37,27 +37,30 @@ Alur utamanya (`Claim Submission → Validation → Claim Context → Generate Q
 2. **Pemetaan kamus** otomatis: pertanyaan episode (menginap, lama rawat) untuk rawat inap; setiap baris tindakan dicocokkan (kode sama, kode induk, kemiripan nama; kesamaan kategori kode saja tanpa kata yang sama tidak dihitung) dengan skor relevansi.
 3. **Konteks klaim** (`claimContextFor`): jenis rawat, malam, diagnosis, baris tindakan, tanpa identitas peserta. Inilah satu-satunya data klaim yang diterima AI.
 4. **Usulan AI**: setiap pertanyaan kandidat mendapat *keyakinan AI* (peluang jawaban pasti); yang di atas ambang dicentang otomatis.
-5. **Persiapan**: verifikator menyetujui hingga 10 pertanyaan (menyunting, menambah dari kamus, atau **Tanya AI**). Draf AI terpisah dari kamus sampai disetujui.
+5. **Persiapan**: verifikator menyetujui hingga 10 pertanyaan (menyunting, menambah dari kamus, atau **Tanya AI**). Tanya AI membuat pertanyaan beserta pilihan jawaban dari konteks klaim dan hasil pemetaan baris tindakan itu, dan **setiap pilihan diberi skor fraud** (0–1). Verifikator dapat menyunting kalimat, pilihan, dan skornya; draf AI terpisah dari kamus sampai disetujui.
 6. **Terbit**: suntingan menjadi versi baru; satu *putaran* mengunci versi persis. Menerbitkan ulang hanya bisa sebelum peserta memulai.
 7. **FRISTA** cocok membuka **sesi adaptif** (tidak cocok dua kali atau tanpa kamera → telepon).
-8. **Sesi**: AI memilih **satu** pertanyaan dari putaran; peserta menjawab; jawaban dicatat dengan waktu perintah, **dievaluasi dengan aturan** (Tabel 1 × keandalan = observabilitas entri), skor indikasi dan dukungan diperbarui, lalu aturan berhenti diperiksa sebelum AI memilih pertanyaan berikutnya. Pertanyaan yang tidak relevan setelah jawaban sebelumnya dilewati (mis. jumlah malam setelah "pulang di hari yang sama").
-9. **Berhenti** bila indikasi mencapai ambang (bawaan 1,00: hanya penyangkalan "tidak pernah ke sana"), batas pertanyaan tercapai, tidak ada pertanyaan relevan, peserta berhenti, atau batas waktu 28 hari lewat. Jawaban yang sudah masuk tetap tersimpan.
-10. **Hasil sesi**: Tabel 2 atas jawaban yang ditanyakan (penyangkalan dan pertentangan → *perlu diperiksa manusia*; semua netral → *bukti tidak cukup*; selain itu *konsisten*) beserta skor. "Tidak ingat" tidak pernah dianggap bantahan.
-11. **Keputusan** verifikator (*sesuai / perlu tindak lanjut / tidak dapat disimpulkan*) wajib beralasan dan menyimpan **dasar evaluasi** saat itu (sesi, pembacaan bukti, skor, alasan berhenti). Faskes melihat hasil keputusannya.
+8. **Sesi**: AI memilih **satu** pertanyaan dari putaran; peserta menjawab; jawaban dicatat dengan waktu perintah dan **dievaluasi dengan aturan**: bobot fraud = skor fraud *pilihan yang dipilih* × keandalan (observabilitas entri). Indikasi fraud dan dukungan diperbarui, lalu indikasi dibaca terhadap ambang sesi menjadi tingkat **rendah / sedang / tinggi**. Tingkat itulah yang menentukan langkah berikutnya: rendah → AI memilih pertanyaan yang paling mungkin dijawab pasti; sedang → AI memilih pertanyaan konfirmasi (pengalaman paling mudah dikenali); tinggi → sesi berhenti. Pertanyaan yang tidak relevan setelah jawaban sebelumnya dilewati (mis. jumlah malam setelah "pulang di hari yang sama").
+9. **Berhenti** bila indikasi mencapai ambang tinggi (bawaan 0,70; 1,00 berarti hanya penyangkalan "tidak pernah ke sana"), batas pertanyaan tercapai, tidak ada pertanyaan relevan, peserta berhenti, atau batas waktu 28 hari lewat. Jawaban yang sudah masuk tetap tersimpan.
+10. **Hasil sesi**: Tabel 2 dibaca lewat tingkat indikasi (tinggi → *perlu diperiksa manusia* dan didahulukan; sedang → *perlu diperiksa manusia*; di bawah ambang sedang tanpa jawaban yang mendukung → *bukti tidak cukup*; selain itu *konsisten*) beserta skor. Karena hasil, aturan berhenti, dan lencana memakai tingkat yang sama, ketiganya tidak pernah saling bertentangan. "Tidak ingat" selalu berskor 0 dan tidak pernah dianggap bantahan.
+11. **Keputusan** verifikator (*sesuai / perlu tindak lanjut / tidak dapat disimpulkan*) wajib beralasan dan menyimpan **dasar evaluasi** saat itu (sesi, pembacaan bukti, skor, tingkat indikasi, alasan berhenti). Faskes melihat hasil keputusannya.
 12. **Analitik** dihitung ulang dari catatan yang sama, termasuk jumlah pertanyaan per sesi dan alasan berhenti.
 
 Putaran yang tidak selesai dalam 28 hari ditutup oleh pekerjaan sistem (saat aplikasi dimuat dan pada setiap siklus sinkronisasi).
 
-### Dua skor, dua arti
+### Skor dan artinya
 
 | Skor | Arti | Dasar | Dipakai untuk |
 |---|---|---|---|
-| Keyakinan AI (`Suggestion.aiConfidence`, `AiPick.predictedDefinite`) | Perkiraan peluang peserta memberi jawaban pasti untuk satu pertanyaan, sebelum ditanyakan | Simulasi: observabilitas × relevansi + jitter tetap | Mencentang dan memilih pertanyaan |
-| Keandalan jawaban (`AnswerEvaluation.reliability`) | Seberapa banyak satu jawaban boleh dihitung | Observabilitas entri bila pasti; 0 bila "Tidak ingat" | Bobot per jawaban |
-| Indikasi ketidaksesuaian (`VerificationScores.indication`) | Gabungan noisy-OR bobot jawaban bertentangan (menginap 0,8, lama rawat 0,4, tindakan 0,6 × keandalan); 1,00 hanya lewat penyangkalan | Aturan `aturan-evaluasi-v1` | Berhenti dan urutan antrean |
-| Dukungan (`VerificationScores.support`) | Gabungan bobot jawaban yang mendukung | Aturan yang sama | Ditampilkan ke verifikator |
+| Keyakinan AI (`Suggestion.aiConfidence`, `AiPick.predictedDefinite`) | Perkiraan peluang peserta memberi jawaban pasti untuk satu pertanyaan, sebelum ditanyakan. **Bukan skor fraud.** | Simulasi: observabilitas × relevansi + jitter tetap | Mencentang dan memilih pertanyaan |
+| Skor fraud pilihan (`AnswerOption.fraudScore`) | Indikasi fraud yang dibawa satu **pilihan jawaban** bila dipilih peserta. Pertanyaan tidak punya skor fraud. | Ditetapkan per pilihan oleh panel kamus, draf AI, atau suntingan verifikator; ikut versi pertanyaan. Aturan: mendukung penuh / netral / "Tidak ingat" = 0, penyangkalan = 1, bertentangan dan rentang malam > 0, sebagian boleh > 0 (`optionScoreProblem`) | Bobot jawaban |
+| Keandalan jawaban (`AnswerEvaluation.reliability`) | Seberapa banyak satu jawaban boleh dihitung | Observabilitas entri bila pasti; 0 bila "Tidak ingat" | Bobot jawaban |
+| Bobot fraud jawaban (`AnswerEvaluation.indicationWeight`) | Skor fraud pilihan yang dipilih × keandalan (penyangkalan = 1; rentang malam hanya bila klaim di luar rentang) | Aturan `aturan-evaluasi-v2` | Indikasi fraud |
+| Indikasi fraud (`VerificationScores.indication`) | Gabungan noisy-OR bobot fraud jawaban; 1,00 hanya lewat penyangkalan | Aturan yang sama | Tingkat indikasi, urutan antrean |
+| Tingkat indikasi (`VerificationScores.level`) | Rendah / sedang / tinggi | `fraudLevel`: indikasi dibandingkan `AiConfig.fraudMediumThreshold` dan `fraudHighThreshold` versi konfigurasi sesi; satu-satunya tempat ambang dibandingkan | Lanjut biasa / lanjut dengan konfirmasi / berhenti; hasil sesi (Tabel 2) |
+| Dukungan (`VerificationScores.support`) | Gabungan bobot jawaban yang mendukung | Aturan yang sama | Hasil sesi (ada/tidak dukungan), ditampilkan ke verifikator |
 
-Skor indikasi **bukan probabilitas fraud yang tervalidasi** dan bukan keputusan; nilainya hanya mengurutkan pekerjaan dan menghentikan pertanyaan.
+Skor indikasi **bukan probabilitas fraud yang tervalidasi** dan bukan keputusan; nilainya hanya mengurutkan pekerjaan dan menghentikan pertanyaan. Ambang tidak ditulis di layanan, aturan, maupun permintaan AI: sistem membaca tingkat dari konfigurasi, lalu mengirim tingkat dan ambang itu ke AI. Mengubah ambang di Konfigurasi AI berlaku untuk sesi baru; sesi yang berjalan memakai versi konfigurasi saat dimulai.
 
 ### Kontrak antarkomponen
 
@@ -66,22 +69,24 @@ Skor indikasi **bukan probabilitas fraud yang tervalidasi** dan bukan keputusan;
 | Form faskes (`ClaimForm`) | `ClaimInput` | `validateClaimInput` (fungsi yang sama dengan perintah) | `Claim` | Verifikator, peserta, AI (via konteks) |
 | Perintah klaim (`submitClaim`) | `ClaimInput` | Validasi, pemetaan, peringkat AI | `Claim`, `ClaimMapping[]`, `Suggestion[]` | Ruang kerja verifikator |
 | AI `rank` | `RankRequest { claim: ClaimContext, candidates }` | Skor peluang jawaban pasti | `RankedQuestion[]` (divalidasi 0–1) | `Suggestion` |
-| AI `next` | `NextQuestionRequest { claim, pool, history, scores, remaining }` | Memilih satu pertanyaan atau melewati yang tidak relevan | `NextQuestionResponse` (harus anggota putaran) | `ResponseSession.pending` |
-| Evaluasi (`evaluateAnswer`, `combineScores`, `stopAfterAnswer`) | Opsi jawaban, entri, malam klaim | Aturan Tabel 1 + bobot | `AnswerEvaluation`, `VerificationScores`, `StopReason` | `Answer`, sesi |
+| AI `next` | `NextQuestionRequest { claim, pool, history, scores, thresholds, remaining }` (riwayat memuat skor fraud dan bobot tiap jawaban; `scores.level` dan `thresholds` dari konfigurasi sesi) | Memilih satu pertanyaan (konfirmasi bila tingkat sedang) atau melewati yang tidak relevan | `NextQuestionResponse` (harus anggota putaran) | `ResponseSession.pending` |
+| AI `draft` (`draftRequestFor`) | `DraftRequest { target, claim, analysis, dictionary }` (konteks klaim, pemetaan baris tindakan, entri kamus beserta pilihan dan skornya) | Kalimat + pilihan ganda, skor fraud per pilihan | `DraftResponse` (diperiksa `checkQuestion`, termasuk `SKOR_FRAUD`) | `AiDraft` → kamus setelah disetujui |
+| Evaluasi (`evaluateAnswer`, `combineScores`, `stopAfterAnswer`) | Pilihan yang dipilih, entri, malam klaim, ambang sesi | Skor fraud pilihan × keandalan, noisy-OR, `fraudLevel` | `AnswerEvaluation`, `VerificationScores` (dengan `level`), `StopReason` | `Answer`, sesi |
 | Sesi (`recordFrista`, `answerQuestion`) | `FristaResult`, `AnswerInput` | Satu transaksi per langkah; AI dipanggil di luar transaksi | `ResponseSession`, `Answer` | Verifikator, analitik |
 | Keputusan (`decideClaim`) | `outcome`, `reason` | Validasi + salin `DecisionBasis` | `Claim.decision` | Faskes, analitik |
 
 Contoh `Answer` tersimpan:
 
 ```json
-{ "id": "ANS-0000227", "sessionId": "RSP-000089", "claimId": "KLM-000104", "assignmentId": "ASG-000102",
+{ "id": "ANS-0000218", "sessionId": "RSP-000089", "claimId": "KLM-000104", "assignmentId": "ASG-000102",
   "questionId": "QST-0005", "questionVersion": 3, "optionId": "BANTAH_1", "iteration": 4,
   "askedAt": "2026-10-21T12:05:00.000Z", "answeredAt": "2026-10-21T12:06:00.000Z",
   "pick": { "model": { "id": "sim-question-ai", "version": "1.0", "kind": "SIMULASI_DETERMINISTIK" }, "predictedDefinite": 0.79,
             "rationale": "Peluang jawaban pasti tertinggi (0,79) dari 1 pertanyaan tersisa." },
-  "evaluation": { "rules": "aturan-evaluasi-v1", "strength": "BERTENTANGAN", "definite": true, "denial": false, "reliability": 0.88,
-                  "indicationWeight": 0.53, "supportWeight": 0, "explanation": "Bertentangan dengan isi klaim; …" },
-  "scoresAfter": { "indication": 0.53, "support": 0.99, "answered": 4, "definite": 4 } }
+  "evaluation": { "rules": "aturan-evaluasi-v2", "strength": "BERTENTANGAN", "definite": true, "denial": false, "reliability": 0.88,
+                  "fraudScore": 0.6, "indicationWeight": 0.53, "supportWeight": 0,
+                  "explanation": "Bertentangan dengan isi klaim; bobot fraud 0,53 = skor fraud pilihan 0,60 × keandalan 0,88." },
+  "scoresAfter": { "indication": 0.53, "support": 0.99, "answered": 4, "definite": 4, "level": "SEDANG" } }
 ```
 
 Bila AI gagal atau menjawab di luar kontrak (pertanyaan di luar putaran, skor di luar 0–1), tidak ada yang disimpan dan peserta dapat mencoba lagi pada pertanyaan yang sama.
@@ -96,7 +101,7 @@ Satu basis data (`src/domain/types.ts`) dengan ID stabil dan referensi eksplisit
 | `claims` | Klaim, status alur kerja, keputusan | → peserta, faskes, DPJP |
 | `statusHistory` | Setiap perubahan status dengan pelaku | → klaim |
 | `dictionary` | Entri kamus pengalaman (episode atau tindakan) | → draf AI asal (bila ada) |
-| `questions` | Pertanyaan dengan **versi tak berubah** (teks, pilihan, pemetaan Tabel 1, asal) | → entri kamus |
+| `questions` | Pertanyaan dengan **versi tak berubah** (teks, pilihan, pemetaan Tabel 1 dan skor fraud per pilihan, asal) | → entri kamus |
 | `mappings` | Hasil pemetaan per atribut klaim | → klaim, entri |
 | `suggestions` | Usulan AI per klaim: skor keyakinan, sumber (pemetaan kamus / draf AI), model, versi konfigurasi, tindakan verifikator | → klaim, versi pertanyaan, pemetaan |
 | `selections` | Pilihan kerja verifikator (belum terbit) | → klaim, versi pertanyaan, usulan |
@@ -105,11 +110,11 @@ Satu basis data (`src/domain/types.ts`) dengan ID stabil dan referensi eksplisit
 | `notifications` | Notifikasi peserta dari peristiwa nyata | → peserta, klaim, putaran |
 | `fristaChecks` | Hasil FRISTA per percobaan | → putaran |
 | `sessions` | Sesi adaptif: pertanyaan yang sedang ditanyakan, yang dilewati AI, alasan berhenti, versi konfigurasi | → putaran, FRISTA |
-| `answers` | Jawaban per langkah: iterasi, alasan AI memilih, evaluasi aturan, skor sesudahnya | → sesi, putaran, versi pertanyaan |
-| `aiConfig`, `aiConfigHistory` | Konfigurasi berversi (ambang relevansi, pilih otomatis, maks. pertanyaan, peringatan draf, ambang berhenti indikasi) | – |
+| `answers` | Jawaban per langkah: iterasi, alasan AI memilih, evaluasi aturan (skor fraud pilihan, bobot), skor dan tingkat indikasi sesudahnya | → sesi, putaran, versi pertanyaan |
+| `aiConfig`, `aiConfigHistory` | Konfigurasi berversi (ambang relevansi, pilih otomatis, maks. pertanyaan, peringatan draf, ambang indikasi fraud sedang dan tinggi) | – |
 | `audit` | Log setiap perubahan dari semua peran | → klaim (bila ada) |
 
-Tidak ada agregat yang disimpan: semua angka analitik diturunkan dari koleksi di atas. Sumber kebenaran: klaim di `claims`; peserta di `participants`; teks pertanyaan di `questions[].versions`; evaluasi dan skor di `answers` (dihitung sekali saat jawaban masuk); hasil sesi di `sessions`; keputusan beserta dasarnya di `claims[].decision`. Skema saat ini versi 3; data versi lama harus di-reset.
+Tidak ada agregat yang disimpan: semua angka analitik diturunkan dari koleksi di atas. Sumber kebenaran: klaim di `claims`; peserta di `participants`; teks pertanyaan di `questions[].versions`; evaluasi dan skor di `answers` (dihitung sekali saat jawaban masuk); hasil sesi di `sessions`; keputusan beserta dasarnya di `claims[].decision`. `checkIntegrity` juga memastikan skor fraud setiap pilihan mengikuti aturannya, skor fraud jawaban sama dengan skor pilihan yang dipilih, tingkat indikasi tersimpan sesuai ambang sesi, dan sesi berhenti tepat pada jawaban pertama yang mencapai tingkat tinggi. Skema saat ini versi 4; data versi lama harus di-reset (tombol Reset data).
 
 ## Penyimpanan
 
@@ -123,9 +128,9 @@ Tidak ada agregat yang disimpan: semua angka analitik diturunkan dari koleksi di
 Semua akses AI melewati antarmuka `QuestionAi` (`src/ai/service.ts`). Implementasi saat ini, `simulatedAi`, deterministik dan tidak belajar; **tidak ada model bahasa atau API AI**:
 
 - **`rank`**: skor dari observabilitas entri kamus, relevansi pemetaan, dan jitter tetap per klaim. Skor menyatakan satu peristiwa: *peluang peserta memberi jawaban pasti (bukan "Tidak ingat")*. Skor tidak pernah menyatakan keabsahan klaim.
-- **`next`**: memilih pertanyaan berikutnya dari putaran yang disetujui verifikator: kehadiran dulu, lalu lama menginap (dilewati bila peserta tidak menginap), lalu tindakan dengan peluang jawaban pasti tertinggi, atau, setelah ada jawaban bertentangan, tindakan yang paling mudah dikenali untuk konfirmasi. AI tidak menulis kalimat baru saat sesi berjalan; hanya kalimat yang disetujui verifikator yang ditanyakan.
-- **`draft` (Tanya AI)**: templat berisi deskripsi pengalaman dari katalog referensi (`src/ai/reference.ts`, belum divalidasi klinisi) dan pola jawaban dari entri kamus sejenis; kalimatnya menyesuaikan jenis rawat bila diminta dari klaim. Bila tidak ada deskripsi untuk kode itu, AI tidak mengarang detail.
-- **Evaluasi jawaban bukan AI**: aturan di `src/domain/verification.ts`.
+- **`next`**: memilih pertanyaan berikutnya dari putaran yang disetujui verifikator: kehadiran dulu, lalu lama menginap (dilewati bila peserta tidak menginap), lalu tindakan dengan peluang jawaban pasti tertinggi, atau, bila tingkat indikasi yang dikirim sistem sedang, tindakan yang paling mudah dikenali untuk konfirmasi. AI tidak memakai angka ambang sendiri; alasannya menyebut tingkat dan ambang yang diterima. AI tidak menulis kalimat baru saat sesi berjalan; hanya kalimat yang disetujui verifikator yang ditanyakan ke peserta.
+- **`draft` (Tanya AI)**: membuat pertanyaan pilihan ganda dari konteks klaim (jenis rawat; jumlah tindakan, bila lebih dari sekali ditambah pilihan "hanya sekali"), hasil pemetaan baris tindakan itu (entri yang dicocokkan dipakai sebagai rujukan pertama), deskripsi pengalaman dari katalog referensi (`src/ai/reference.ts`, belum divalidasi klinisi), dan entri kamus sejenis. **Setiap pilihan diberi skor fraud**: rata-rata pilihan sejenis di entri rujukan, atau nilai awal model bila tidak ada rujukan; alasannya tertulis di draf. Bila tidak ada deskripsi untuk kode itu, AI tidak mengarang detail.
+- **Evaluasi jawaban bukan AI**: aturan di `src/domain/verification.ts`; ambangnya dari `AiConfig`.
 - Permintaan ke AI tidak memuat identitas peserta; daftar isinya (`AI_REQUEST_FIELDS`) tampil di Konfigurasi AI.
 - Mengganti dengan layanan sungguhan cukup dengan implementasi `QuestionAi` lain (`kind: 'MODEL_EKSTERNAL'`); alur kerja memanggil AI di luar transaksi dan memvalidasi keluarannya sebelum menyimpan.
 
@@ -139,7 +144,7 @@ Prinsipnya: setiap proporsi tampil dengan n dan interval 95%; di bawah n minimum
 
 - **Klaim historis**: 100 klaim dari `datasets/1_dataset_klaim_bpjs_sample_training.csv` (Juni 2026). Verifikasinya disimulasikan dengan menjalankan ulang perintah aplikasi yang sama dalam urutan waktu, sehingga data historis mengikuti aturan yang sama dengan penggunaan langsung. Kolom kebenaran dasar dataset hanya mengarahkan jawaban peserta simulasi dan tidak disimpan.
 - **Kamus awal**: 10 entri dari `datasets/2_dataset_kamus_observabilitas_pertanyaan.csv` ditambah dua entri episode.
-- **Kasus demo** (Oktober 2026): `KLM-000101` siap disiapkan, `KLM-000102` tanpa entri kamus untuk tindakan utamanya (Tanya AI), `KLM-000103` menunggu Budi Santoso memulai sesi, `KLM-000104` sesi selesai dengan satu pertentangan (indikasi 0,53). Peserta **Yohanes Situmorang** (kartu `0001234500059`) belum punya klaim, untuk mencoba alur dari awal.
+- **Kasus demo** (Oktober 2026): `KLM-000101` siap disiapkan, `KLM-000102` tanpa entri kamus untuk tindakan utamanya (Tanya AI), `KLM-000103` menunggu Budi Santoso memulai sesi, `KLM-000104` sesi selesai dengan satu pertentangan (indikasi 0,53, tingkat sedang: AI melanjutkan sampai pertanyaan habis). Peserta **Yohanes Situmorang** (kartu `0001234500059`) belum punya klaim, untuk mencoba alur dari awal.
 - Nama orang, faskes, dokter, kode faskes, dan kode INA-CBG adalah fiktif.
 
 ## Struktur kode
@@ -160,6 +165,6 @@ datasets/          Dataset contoh (CSV)
 - AI, FRISTA, kepesertaan, dan login adalah simulasi; satu akun verifikator.
 - Jalur telepon untuk peserta yang dialihkan hanya dicatat statusnya; belum ada layar petugas kontak.
 - Dataset historis kecil (100 klaim, satu prosedur per klaim, empat minggu), jadi banyak rincian analitik menampilkan *data belum cukup*, dan putaran biasanya hanya 2–4 pertanyaan sehingga sesi jarang berhenti karena batas pertanyaan. Skor keyakinan simulasi lemah membedakan jawaban pasti dan itu ditampilkan apa adanya.
-- Bobot evaluasi (0,8 / 0,4 / 0,6) dan skor indikasi adalah pilihan aturan simulasi, belum dikalibrasi terhadap hasil verifikasi nyata.
+- Skor fraud pilihan di kamus awal (pulang di hari yang sama 0,8, penyangkalan 1, rentang malam tidak sesuai 0,4, tindakan dibantah 0,6, sebagian 0,2; `PANEL_FRAUD_SCORE`), nilai awal model draf (0,6 / 0,2), dan ambang bawaan (sedang 0,30, tinggi 0,70) adalah pilihan simulasi, belum dikalibrasi terhadap hasil verifikasi nyata. Dengan ambang bawaan, "pulang di hari yang sama" (0,78) langsung menghentikan sesi, jadi pertanyaan lama menginap jarang dilewati di data simulasi.
 - Entri kamus dari draf AI belum punya penilaian observabilitas (memakai 0,55) dan belum ada layar untuk menilainya.
 - Deskripsi pengalaman di katalog referensi dan kamus awal belum divalidasi klinisi.

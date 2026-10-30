@@ -1,4 +1,4 @@
-import type { ActorRef, AiConfig, DictionaryEntry, Facility, Practitioner, Question } from '../../domain/types';
+import type { ActorRef, AiConfig, AnswerOption, DictionaryEntry, Facility, Practitioner, Question } from '../../domain/types';
 import { parseCsv } from '../../lib/csv';
 import kamusCsv from '../../../datasets/2_dataset_kamus_observabilitas_pertanyaan.csv?raw';
 
@@ -69,10 +69,28 @@ export const INITIAL_AI_CONFIG: AiConfig = {
   autoSelectThreshold: 0.6,
   maxQuestions: 5,
   draftWarningThreshold: 0.5,
-  stopIndicationThreshold: 1,
+  fraudMediumThreshold: 0.3,
+  fraudHighThreshold: 0.7,
   updatedAt: SEED_EPOCH,
   updatedBy: DICTIONARY_PANEL,
 };
+
+/**
+ * Fraud scores the simulated dictionary panel gave each kind of answer option. They are data on every
+ * option (versioned with the question, editable by the verifier), not weights in the evaluation rules.
+ */
+export const PANEL_FRAUD_SCORE = {
+  /** Billed as inpatient, but the participant went home the same day. */
+  PULANG_HARI_ITU: 0.8,
+  /** The participant was never there. */
+  PENYANGKALAN: 1,
+  /** The night range the participant chose does not contain the billed nights. */
+  MALAM_TIDAK_SESUAI: 0.4,
+  /** A billed procedure the participant says did not happen. */
+  TINDAKAN_DIBANTAH: 0.6,
+  /** "Something like it, but not exactly". */
+  SEBAGIAN: 0.2,
+} as const;
 
 function splitList(text: string, sep: RegExp): string[] {
   return text.split(sep).map((s) => s.trim()).filter(Boolean);
@@ -108,10 +126,10 @@ export function initialDictionary(): { entries: DictionaryEntry[]; questions: Qu
         ...v1,
         text: 'Apa yang Anda ingat tentang kunjungan Anda ke {faskes} pada {periode}?',
         options: [
-          { id: 'DIRAWAT_MENGINAP', label: 'Saya dirawat dan menginap', mapping: { kind: 'TETAP', strength: 'KUAT' } },
-          { id: 'PULANG_HARI_ITU', label: 'Saya datang, lalu pulang di hari yang sama', mapping: { kind: 'TETAP', strength: 'BERTENTANGAN' } },
-          { id: 'TIDAK_PERNAH', label: 'Saya tidak pernah ke sana', mapping: { kind: 'TETAP', strength: 'BERTENTANGAN' }, denial: true },
-          { id: 'TIDAK_INGAT', label: 'Tidak ingat', mapping: { kind: 'TETAP', strength: 'NETRAL' }, unsure: true },
+          { id: 'DIRAWAT_MENGINAP', label: 'Saya dirawat dan menginap', mapping: { kind: 'TETAP', strength: 'KUAT' }, fraudScore: 0 },
+          { id: 'PULANG_HARI_ITU', label: 'Saya datang, lalu pulang di hari yang sama', mapping: { kind: 'TETAP', strength: 'BERTENTANGAN' }, fraudScore: PANEL_FRAUD_SCORE.PULANG_HARI_ITU },
+          { id: 'TIDAK_PERNAH', label: 'Saya tidak pernah ke sana', mapping: { kind: 'TETAP', strength: 'BERTENTANGAN' }, fraudScore: PANEL_FRAUD_SCORE.PENYANGKALAN, denial: true },
+          { id: 'TIDAK_INGAT', label: 'Tidak ingat', mapping: { kind: 'TETAP', strength: 'NETRAL' }, fraudScore: 0, unsure: true },
         ],
       }],
     },
@@ -121,11 +139,11 @@ export function initialDictionary(): { entries: DictionaryEntry[]; questions: Qu
         ...v1,
         text: 'Berapa malam Anda menginap di rumah sakit saat itu?',
         options: [
-          { id: 'N1', label: '1 malam', mapping: { kind: 'RENTANG_MALAM', min: 1, max: 1 } },
-          { id: 'N2_3', label: '2–3 malam', mapping: { kind: 'RENTANG_MALAM', min: 2, max: 3 } },
-          { id: 'N4_7', label: '4–7 malam', mapping: { kind: 'RENTANG_MALAM', min: 4, max: 7 } },
-          { id: 'N8P', label: 'Lebih dari 7 malam', mapping: { kind: 'RENTANG_MALAM', min: 8, max: null } },
-          { id: 'TIDAK_INGAT', label: 'Tidak ingat', mapping: { kind: 'TETAP', strength: 'NETRAL' }, unsure: true },
+          { id: 'N1', label: '1 malam', mapping: { kind: 'RENTANG_MALAM', min: 1, max: 1 }, fraudScore: PANEL_FRAUD_SCORE.MALAM_TIDAK_SESUAI },
+          { id: 'N2_3', label: '2–3 malam', mapping: { kind: 'RENTANG_MALAM', min: 2, max: 3 }, fraudScore: PANEL_FRAUD_SCORE.MALAM_TIDAK_SESUAI },
+          { id: 'N4_7', label: '4–7 malam', mapping: { kind: 'RENTANG_MALAM', min: 4, max: 7 }, fraudScore: PANEL_FRAUD_SCORE.MALAM_TIDAK_SESUAI },
+          { id: 'N8P', label: 'Lebih dari 7 malam', mapping: { kind: 'RENTANG_MALAM', min: 8, max: null }, fraudScore: PANEL_FRAUD_SCORE.MALAM_TIDAK_SESUAI },
+          { id: 'TIDAK_INGAT', label: 'Tidak ingat', mapping: { kind: 'TETAP', strength: 'NETRAL' }, fraudScore: 0, unsure: true },
         ],
       }],
     },
@@ -136,10 +154,11 @@ export function initialDictionary(): { entries: DictionaryEntry[]; questions: Qu
     const text = row.pertanyaan_peserta_awam;
     const support = splitList(row.opsi_jawaban_mendukung, /\s+\/\s+/);
     const contra = splitList(row.opsi_jawaban_bertentangan, /\s+\/\s+/);
-    const options = [
-      ...support.map((label, k) => ({ id: `DUKUNG_${k + 1}`, label: sentence(label), mapping: { kind: 'TETAP' as const, strength: (row.bobot_mendukung || 'KUAT') as 'KUAT' } })),
-      ...contra.map((label, k) => ({ id: `BANTAH_${k + 1}`, label: sentence(label), mapping: { kind: 'TETAP' as const, strength: 'BERTENTANGAN' as const } })),
-      { id: 'TIDAK_INGAT', label: row.opsi_jawaban_netral || 'Tidak ingat', mapping: { kind: 'TETAP' as const, strength: 'NETRAL' as const }, unsure: true },
+    const supportStrength = (row.bobot_mendukung || 'KUAT') as 'KUAT' | 'SEBAGIAN';
+    const options: AnswerOption[] = [
+      ...support.map((label, k) => ({ id: `DUKUNG_${k + 1}`, label: sentence(label), mapping: { kind: 'TETAP' as const, strength: supportStrength }, fraudScore: 0 })),
+      ...contra.map((label, k) => ({ id: `BANTAH_${k + 1}`, label: sentence(label), mapping: { kind: 'TETAP' as const, strength: 'BERTENTANGAN' as const }, fraudScore: PANEL_FRAUD_SCORE.TINDAKAN_DIBANTAH })),
+      { id: 'TIDAK_INGAT', label: row.opsi_jawaban_netral || 'Tidak ingat', mapping: { kind: 'TETAP' as const, strength: 'NETRAL' as const }, fraudScore: 0, unsure: true },
     ];
     const wording = [text, ...options.map((o) => o.label)].join(' ').toLowerCase();
     entries.push({

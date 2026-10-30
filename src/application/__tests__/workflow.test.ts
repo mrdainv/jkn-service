@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { computeAnalytics } from '../../analytics/metrics';
-import type { NextQuestionRequest, QuestionAi, RankRequest } from '../../ai/service';
+import type { DraftRequest, NextQuestionRequest, QuestionAi, RankRequest } from '../../ai/service';
 import { simulatedAi } from '../../ai/simulatedAi';
 import { buildSeed } from '../../data/seed/buildSeed';
 import { DbStore, MemoryBackend } from '../../data/store';
+import { optionScoreProblem } from '../../domain/checks';
 import { checkIntegrity } from '../../domain/integrity';
 import { answersOf, claimEvidence, currentAssignment, getEntry, getQuestion, getVersion, sessionFor } from '../../domain/queries';
 import type { ActorRef, AnswerOption, Db, ResponseSession } from '../../domain/types';
@@ -27,13 +28,14 @@ const db = (): Db => store.getSnapshot()!.db;
 function spyAi(overrides: Partial<Pick<QuestionAi, 'next'>> = {}) {
   const ranks: RankRequest[] = [];
   const nexts: NextQuestionRequest[] = [];
+  const drafts: DraftRequest[] = [];
   const ai: QuestionAi = {
     info: simulatedAi.info,
-    draft: simulatedAi.draft,
+    draft: (r) => (drafts.push(r), simulatedAi.draft(r)),
     rank: (r) => (ranks.push(r), simulatedAi.rank(r)),
     next: (r) => (nexts.push(r), (overrides.next ?? simulatedAi.next)(r)),
   };
-  return { ai, ranks, nexts };
+  return { ai, ranks, nexts, drafts };
 }
 
 async function freshStore(backend = new MemoryBackend()) {
@@ -135,10 +137,16 @@ describe('facility → verifier → AI session → participant → decision → 
     // Ask AI for the gap, regenerate once, approve: the dictionary grows and the claim gets the question.
     const first = await actions.askAi(claim.id, { code: '89.52', name: 'Elektrokardiogram (EKG)', category: 'Penunjang' }, VERIFIER);
     expect(first.context.claimAttributes).toContain('jenis rawat');
+    // The AI drafted from the claim context and the mapping analysis of that line, and scored every option.
+    expect(spy.drafts.at(-1)).toMatchObject({ claim: { claimKey: claim.id, careType: 'RAWAT_INAP' }, analysis: { status: 'TIDAK_TERPETAKAN', matchedEntryId: null } });
+    expect(JSON.stringify(spy.drafts.at(-1))).not.toContain(participant.cardNumber);
+    expect(first.proposal.options.every((o) => optionScoreProblem(o) === null)).toBe(true);
+    expect(first.proposal.options.some((o) => o.fraudScore > 0)).toBe(true);
     const second = await actions.regenerateDraft(first, VERIFIER);
     expect(db().drafts.find((d) => d.id === first.id)?.status).toBe('DIGANTIKAN');
     const { entry, question } = await actions.approveDraft(second.id, VERIFIER);
     expect(entry.source).toBe('DRAF_AI');
+    expect(question.versions[0].options.map((o) => o.fraudScore)).toEqual(second.proposal.options.map((o) => o.fraudScore));
     expect(db().mappings.find((m) => m.claimId === claim.id && m.target.kind === 'PROSEDUR' && m.target.code === '89.52')).toMatchObject({ status: 'TERPETAKAN', entryId: entry.id });
     expect(db().suggestions.find((s) => s.claimId === claim.id && s.questionId === question.id)?.source).toBe('DRAF_AI');
     const items = db().selections.find((s) => s.claimId === claim.id)!.items;
@@ -191,7 +199,9 @@ describe('facility → verifier → AI session → participant → decision → 
       expect(req.claim.claimKey).toBe(claim.id);
     }
     expect(spy.nexts.length - nextCallsBefore).toBeGreaterThanOrEqual(answers.length - 1);
-    expect(answers.at(-1)!.scoresAfter).toMatchObject({ indication: 0, answered: answers.length });
+    expect(answers.at(-1)!.scoresAfter).toMatchObject({ indication: 0, answered: answers.length, level: 'RENDAH' });
+    // Each request for the next question carried the level and the session's configured thresholds.
+    expect(spy.nexts.filter((r) => r.sessionKey === ended.id).every((r) => r.thresholds.medium === 0.3 && r.thresholds.high === 0.7 && r.scores.level === 'RENDAH')).toBe(true);
     expect(ended).toMatchObject({ status: 'SELESAI', pending: null, stopReason: 'PERTANYAAN_HABIS' });
     expect(db().claims.find((c) => c.id === claim.id)?.status).toBe('JAWABAN_DITERIMA');
     await expectCode(actions.answer({ sessionId: s.id, questionId: p1.questionId, questionVersion: p1.questionVersion, optionId: 'DIRAWAT_MENGINAP' }, me), 'ALREADY_SUBMITTED');
@@ -209,7 +219,7 @@ describe('facility → verifier → AI session → participant → decision → 
     await actions.decide(claim.id, 'SESUAI', 'Semua jawaban peserta sejalan dengan isi klaim.', VERIFIER);
     const decided = db().claims.find((c) => c.id === claim.id)!;
     expect(decided.status).toBe('SELESAI');
-    expect(decided.decision?.basis).toEqual({ sessionId: ended.id, evidenceStatus: 'KONSISTEN', indication: 0, support: answers.at(-1)!.scoresAfter.support, stopReason: 'PERTANYAAN_HABIS', answered: answers.length });
+    expect(decided.decision?.basis).toEqual({ sessionId: ended.id, evidenceStatus: 'KONSISTEN', indication: 0, level: 'RENDAH', support: answers.at(-1)!.scoresAfter.support, stopReason: 'PERTANYAAN_HABIS', answered: answers.length });
     expect(computeAnalytics(db()).outcomeTable).toContainEqual({ evidence: 'KONSISTEN', decision: 'SESUAI', count: expect.any(Number) });
     expect(checkIntegrity(db())).toEqual([]);
   });
@@ -238,26 +248,51 @@ describe('adaptive session rules', () => {
     const s = session(round.id);
     await actions.answer({ sessionId: s.id, questionId: 'QST-EP01', questionVersion: 1, optionId: 'TIDAK_PERNAH' }, me);
     const ended = session(round.id);
-    expect(ended).toMatchObject({ status: 'SELESAI', stopReason: 'INDIKASI_MAKSIMUM', pending: null });
+    expect(ended).toMatchObject({ status: 'SELESAI', stopReason: 'INDIKASI_TINGGI', pending: null });
     const answers = answersOf(db(), ended.id);
     expect(answers).toHaveLength(1);
-    expect(answers[0].scoresAfter.indication).toBe(1);
+    expect(answers[0].evaluation).toMatchObject({ fraudScore: 1, indicationWeight: 1 });
+    expect(answers[0].scoresAfter).toMatchObject({ indication: 1, level: 'TINGGI' });
     expect(db().claims.find((c) => c.id === claim.id)?.status).toBe('JAWABAN_DITERIMA');
     expect(claimEvidence(db(), db().claims.find((c) => c.id === claim.id)!)!.result).toMatchObject({ status: 'PERLU_DIPERIKSA', priority: true });
     expect(checkIntegrity(db())).toEqual([]);
   });
 
-  it('does not ask for nights after the participant says they went home the same day', async () => {
-    const { round, me } = await publishedClaim(actions);
+  it('stops as soon as an answer brings the indication to the configured high threshold', async () => {
+    const { claim, round, me } = await publishedClaim(actions);
+    await actions.recordFrista(round.id, 'COCOK', me);
+    const s = session(round.id);
+    // "Went home the same day" carries 0,80; × reliability 0,97 = 0,78 ≥ the default high threshold 0,70.
+    await actions.answer({ sessionId: s.id, questionId: 'QST-EP01', questionVersion: 1, optionId: 'PULANG_HARI_ITU' }, me);
+    const ended = session(round.id);
+    expect(ended).toMatchObject({ status: 'SELESAI', stopReason: 'INDIKASI_TINGGI' });
+    expect(round.items.length).toBeGreaterThan(1);
+    const [only] = answersOf(db(), ended.id);
+    expect(only.evaluation).toMatchObject({ strength: 'BERTENTANGAN', denial: false, fraudScore: 0.8, indicationWeight: 0.78 });
+    expect(only.scoresAfter).toMatchObject({ indication: 0.78, level: 'TINGGI' });
+    expect(claimEvidence(db(), db().claims.find((c) => c.id === claim.id)!)!.result).toMatchObject({ status: 'PERLU_DIPERIKSA', priority: true, rule: 1 });
+    expect(checkIntegrity(db())).toEqual([]);
+  });
+
+  it('keeps asking, with confirming questions, while the indication is at the medium level', async () => {
+    // A higher high threshold makes the same answer read SEDANG: the session goes on instead of stopping.
+    await actions.updateAiConfig({ fraudHighThreshold: 0.9 }, VERIFIER);
+    const spy = spyAi();
+    actions = createActions(store, spy.ai, tick);
+    const { claim, round, me } = await publishedClaim(actions);
     await actions.recordFrista(round.id, 'COCOK', me);
     const ended = await answerAll(actions, round.id, me, (options, questionId) => (questionId === 'QST-EP01' ? 'PULANG_HARI_ITU' : supporting(options, 3)));
+    const answers = [...answersOf(db(), ended.id)].sort((a, b) => a.iteration - b.iteration);
+    expect(answers[0].scoresAfter).toMatchObject({ indication: 0.78, level: 'SEDANG' });
+    // The nights question is irrelevant after "went home", and the AI was told the level and thresholds it confirms under.
     expect(ended.skipped.map((x) => x.questionId)).toEqual(['QST-EP02']);
-    expect(answersOf(db(), ended.id).map((a) => a.questionId)).not.toContain('QST-EP02');
-    const first = answersOf(db(), ended.id).find((a) => a.iteration === 1)!;
-    expect(first.evaluation).toMatchObject({ strength: 'BERTENTANGAN', denial: false });
-    expect(first.scoresAfter.indication).toBeGreaterThan(0);
-    expect(first.scoresAfter.indication).toBeLessThan(1);
+    const after = spy.nexts.find((r) => r.sessionKey === ended.id && r.history.length === 1)!;
+    expect(after).toMatchObject({ scores: { level: 'SEDANG' }, thresholds: { medium: 0.3, high: 0.9 } });
+    expect(after.history[0]).toMatchObject({ fraudScore: 0.8, indicationWeight: 0.78 });
+    expect(answers[1].pick.rationale).toContain('Indikasi sedang');
     expect(ended.stopReason).toBe('PERTANYAAN_HABIS');
+    expect(claimEvidence(db(), db().claims.find((c) => c.id === claim.id)!)!.result).toMatchObject({ status: 'PERLU_DIPERIKSA', priority: false, rule: 2 });
+    expect(checkIntegrity(db())).toEqual([]);
   });
 
   it('never counts "Tidak ingat" as a rebuttal and stops at the question limit', async () => {
@@ -324,13 +359,30 @@ describe('adaptive session rules', () => {
     expect(checkIntegrity(db())).toEqual([]);
   });
 
-  it('runs a session under the configuration it started with', async () => {
+  it('runs a session under the configuration it started with, thresholds included', async () => {
     const { round, me } = await publishedClaim(actions);
     await actions.recordFrista(round.id, 'COCOK', me);
-    await actions.updateAiConfig({ maxQuestions: 1 }, VERIFIER);
-    const ended = await answerAll(actions, round.id, me, (options) => supporting(options, 3));
-    expect(answersOf(db(), ended.id).length).toBeGreaterThan(1);
-    await expectCode(actions.updateAiConfig({ stopIndicationThreshold: 0.2 }, VERIFIER), 'INVALID_CONFIG');
+    // Lower thresholds after the start would make the contradiction below read TINGGI; the session keeps its own.
+    await actions.updateAiConfig({ maxQuestions: 1, fraudMediumThreshold: 0.2, fraudHighThreshold: 0.5 }, VERIFIER);
+    const ended = await answerAll(actions, round.id, me, (options, questionId) =>
+      getEntry(db(), getQuestion(db(), questionId).entryId).scope === 'PROSEDUR' ? options.find((o) => o.mapping.kind === 'TETAP' && o.mapping.strength === 'BERTENTANGAN')!.id : supporting(options, 3),
+    );
+    const answers = answersOf(db(), ended.id);
+    expect(answers.length).toBeGreaterThan(1);
+    const contradiction = answers.find((a) => a.evaluation.strength === 'BERTENTANGAN')!;
+    expect(contradiction.scoresAfter.indication).toBeGreaterThanOrEqual(0.5);
+    expect(contradiction.scoresAfter.level).toBe('SEDANG');
+    expect(ended.stopReason).toBe('PERTANYAAN_HABIS');
+    expect(checkIntegrity(db())).toEqual([]);
+  });
+
+  it('accepts only ordered fraud thresholds', async () => {
+    await expectCode(actions.updateAiConfig({ fraudMediumThreshold: 0.8 }, VERIFIER), 'INVALID_CONFIG');
+    await expectCode(actions.updateAiConfig({ fraudMediumThreshold: 0 }, VERIFIER), 'INVALID_CONFIG');
+    await expectCode(actions.updateAiConfig({ fraudHighThreshold: 1.2 }, VERIFIER), 'INVALID_CONFIG');
+    const cfg = await actions.updateAiConfig({ fraudMediumThreshold: 0.4, fraudHighThreshold: 1 }, VERIFIER);
+    expect(cfg).toMatchObject({ fraudMediumThreshold: 0.4, fraudHighThreshold: 1 });
+    expect(db().aiConfigHistory.at(-1)).toMatchObject({ fraudMediumThreshold: 0.3, fraudHighThreshold: 0.7 });
   });
 });
 

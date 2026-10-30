@@ -3,12 +3,12 @@ import { useState } from 'react';
 import { decisionBasis } from '../../application/commands';
 import { useAction, useApp } from '../../application/context';
 import { claimedNights, EVIDENCE_RULE_TEXT } from '../../domain/evidence';
-import { CARE_CLASS_LABEL, CARE_TYPE_LABEL, DECISION_HELP, DECISION_LABEL, EVIDENCE_STATUS_LABEL, FRISTA_LABEL, SCORE_DISCLAIMER, SEGMENT_LABEL, STOP_REASON_LABEL } from '../../domain/labels';
+import { CARE_CLASS_LABEL, CARE_TYPE_LABEL, DECISION_HELP, DECISION_LABEL, EVIDENCE_STATUS_LABEL, FRAUD_LEVEL_EFFECT, FRAUD_LEVEL_LABEL, FRISTA_LABEL, SCORE_DISCLAIMER, SEGMENT_LABEL, STOP_REASON_LABEL } from '../../domain/labels';
 import { claimEvidence, configAt, currentAssignment, findClaim, fristaChecksFor, getFacility, getParticipant, getPractitioner, questionLimit, renderText } from '../../domain/queries';
 import type { Claim, DecisionBasis, DecisionOutcome } from '../../domain/types';
 import { ageOn, formatDate, formatDateTime, formatPeriod, formatRupiah, formatScore } from '../../lib/format';
 import { href } from '../../lib/router';
-import { ClaimStatusBadge, DecisionBadge, EvidenceBadge, IndicationBadge, StrengthBadge } from '../status';
+import { ClaimStatusBadge, DecisionBadge, EvidenceBadge, FraudLevelBadge, StrengthBadge } from '../status';
 import { Badge, Button, Card, Empty, KeyValue, Notice, PageHeader, Tabs } from '../ui';
 import { cx, inputCls, td, th } from '../styles';
 import { VERIFIER_ACTOR } from './actor';
@@ -57,8 +57,8 @@ export function ClaimWorkspace({ claimId }: { claimId: string }) {
           <span className="flex flex-wrap items-center gap-2">
             <span className="font-mono">{claim.id}</span>
             <ClaimStatusBadge status={claim.status} />
-            {evidence?.result && <EvidenceBadge status={evidence.result.status} priority={evidence.result.priority} />}
-            {evidence?.session && evidence.scores.answered > 0 && <IndicationBadge value={evidence.scores.indication} threshold={configAt(db, evidence.session.aiConfigVersion).stopIndicationThreshold} />}
+            {evidence?.result && <EvidenceBadge status={evidence.result.status} denied={evidence.denied} />}
+            {evidence?.session && evidence.scores.answered > 0 && <FraudLevelBadge value={evidence.scores.indication} level={evidence.scores.level} />}
             {claim.decision && <DecisionBadge outcome={claim.decision.outcome} />}
           </span>
         }
@@ -163,7 +163,7 @@ function EvidencePanel({ claim }: { claim: Claim }) {
                 <th className={th}>Isi klaim</th>
                 <th className={th}>Alasan AI memilih</th>
                 <th className={th}>Jawaban peserta</th>
-                <th className={th}>Evaluasi (aturan)</th>
+                <th className={th}>Evaluasi jawaban (aturan)</th>
                 <th className={th}>Skor sesudahnya</th>
               </tr>
             </thead>
@@ -217,7 +217,10 @@ function EvidencePanel({ claim }: { claim: Claim }) {
                     <td className={cx(td, 'max-w-xs')}>
                       {r.evaluation ? (
                         <>
-                          <StrengthBadge strength={r.evaluation.strength} />
+                          <span className="flex flex-wrap items-center gap-1">
+                            <StrengthBadge strength={r.evaluation.strength} />
+                            <span className="tabular text-[11px] text-slate-600">skor fraud pilihan {formatScore(r.evaluation.fraudScore)}</span>
+                          </span>
                           <div className="mt-1 text-[11px] text-slate-500">{r.evaluation.explanation}</div>
                         </>
                       ) : (
@@ -228,6 +231,7 @@ function EvidencePanel({ claim }: { claim: Claim }) {
                       {r.answer ? (
                         <>
                           indikasi {formatScore(r.answer.scoresAfter.indication)}
+                          <div className={r.answer.scoresAfter.level === 'RENDAH' ? 'text-slate-500' : 'font-medium text-red-700'}>{FRAUD_LEVEL_LABEL[r.answer.scoresAfter.level].toLowerCase()}</div>
                           <div className="text-slate-500">dukungan {formatScore(r.answer.scoresAfter.support)}</div>
                         </>
                       ) : (
@@ -253,15 +257,24 @@ function EvidencePanel({ claim }: { claim: Claim }) {
         <Card title="Hasil verifikasi sesi">
           {evidence.result ? (
             <>
-              <EvidenceBadge status={evidence.result.status} priority={evidence.result.priority} />
+              <span className="flex flex-wrap gap-1">
+                <EvidenceBadge status={evidence.result.status} denied={evidence.denied} />
+                <FraudLevelBadge value={scores.indication} level={scores.level} />
+              </span>
               <p className="mt-2 text-sm text-slate-700">{EVIDENCE_RULE_TEXT[evidence.result.rule]}</p>
             </>
           ) : (
-            <p className="text-sm text-slate-600">{session?.status === 'BERLANGSUNG' ? 'Sesi masih berlangsung; hasil akhir muncul setelah sesi berhenti.' : 'Belum ada jawaban.'}</p>
+            <p className="text-sm text-slate-600">
+              {session?.status === 'BERLANGSUNG' ? `Sesi masih berlangsung (${FRAUD_LEVEL_LABEL[scores.level].toLowerCase()}): ${FRAUD_LEVEL_EFFECT[scores.level]}` : 'Belum ada jawaban.'}
+            </p>
           )}
           <dl className="mt-3 grid grid-cols-2 gap-1 text-xs">
-            <dt className="text-slate-500">Indikasi ketidaksesuaian</dt>
-            <dd className="tabular">{scores.answered ? formatScore(scores.indication) : '–'} (berhenti pada {formatScore(cfg.stopIndicationThreshold)})</dd>
+            <dt className="text-slate-500">Indikasi fraud</dt>
+            <dd className="tabular">{scores.answered ? `${formatScore(scores.indication)} · ${FRAUD_LEVEL_LABEL[scores.level].toLowerCase()}` : '–'}</dd>
+            <dt className="text-slate-500">Ambang sesi (konfigurasi v{cfg.version})</dt>
+            <dd className="tabular">
+              sedang ≥ {formatScore(cfg.fraudMediumThreshold)} · tinggi (berhenti) ≥ {formatScore(cfg.fraudHighThreshold)}
+            </dd>
             <dt className="text-slate-500">Dukungan</dt>
             <dd className="tabular">{scores.answered ? formatScore(scores.support) : '–'}</dd>
             <dt className="text-slate-500">Jawaban pasti / total</dt>
@@ -291,8 +304,11 @@ function EvidencePanel({ claim }: { claim: Claim }) {
         <Card title="Cara sesi berjalan">
           <ol className="list-decimal space-y-1 pl-4 text-xs text-slate-600">
             <li>FRISTA cocok membuka sesi; AI memilih satu pertanyaan dari putaran yang disetujui.</li>
-            <li>Setiap jawaban dievaluasi dengan aturan Tabel 1 dan bobot keandalan (observabilitas) sebelum pertanyaan berikutnya.</li>
-            <li>Sesi berhenti bila indikasi mencapai ambang, batas {cfg.maxQuestions} pertanyaan tercapai, atau tidak ada pertanyaan relevan.</li>
+            <li>Setiap jawaban dievaluasi dengan skor fraud pilihan yang dipilih × keandalan (observabilitas), lalu indikasi dibaca terhadap ambang sesi.</li>
+            <li>
+              Indikasi rendah: AI lanjut dengan pertanyaan yang paling mungkin dijawab pasti. Sedang (≥ {formatScore(cfg.fraudMediumThreshold)}): AI lanjut dengan pertanyaan konfirmasi.
+            </li>
+            <li>Sesi berhenti bila indikasi tinggi (≥ {formatScore(cfg.fraudHighThreshold)}), batas {cfg.maxQuestions} pertanyaan tercapai, atau tidak ada pertanyaan relevan.</li>
           </ol>
         </Card>
       </div>
@@ -305,10 +321,12 @@ function BasisSummary({ basis }: { basis: DecisionBasis }) {
     <dl className="grid grid-cols-2 gap-1 text-xs">
       <dt className="text-slate-500">Pembacaan bukti</dt>
       <dd>{basis.evidenceStatus === 'TANPA_JAWABAN' ? 'Tanpa jawaban peserta' : EVIDENCE_STATUS_LABEL[basis.evidenceStatus]}</dd>
-      <dt className="text-slate-500">Indikasi / dukungan</dt>
+      <dt className="text-slate-500">Indikasi fraud / dukungan</dt>
       <dd className="tabular">
         {formatScore(basis.indication)} / {formatScore(basis.support)}
       </dd>
+      <dt className="text-slate-500">Tingkat indikasi</dt>
+      <dd>{basis.level ? FRAUD_LEVEL_LABEL[basis.level] : '–'}</dd>
       <dt className="text-slate-500">Jawaban</dt>
       <dd className="tabular">{basis.answered}</dd>
       <dt className="text-slate-500">Sesi berhenti karena</dt>

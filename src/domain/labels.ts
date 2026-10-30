@@ -3,6 +3,7 @@ import type {
   CareType,
   ClaimStatus,
   DecisionOutcome,
+  FraudLevel,
   FristaResult,
   MappingStatus,
   MatchType,
@@ -13,7 +14,8 @@ import type {
 } from './types';
 import type { EvidenceStatus } from './evidence';
 
-// One wording per concept, used by every role. Neutral by design: nothing here suggests fraud.
+// One wording per concept, used by every role. What the participant and the facility see is neutral;
+// fraud wording (levels, stop reasons, the score disclaimer) appears on verifier screens only.
 
 export const CARE_TYPE_LABEL: Record<CareType, string> = {
   RAWAT_INAP: 'Rawat inap',
@@ -120,13 +122,27 @@ export const PARTICIPANT_STATUS_LABEL: Record<ClaimStatus, string> = {
 
 /** Why the adaptive questioning stopped. */
 export const STOP_REASON_LABEL: Record<StopReason, string> = {
-  INDIKASI_MAKSIMUM: 'Indikasi ketidaksesuaian mencapai ambang berhenti',
+  INDIKASI_TINGGI: 'Indikasi fraud mencapai ambang tinggi',
   BATAS_PERTANYAAN: 'Batas jumlah pertanyaan tercapai',
   PERTANYAAN_HABIS: 'Tidak ada pertanyaan relevan yang tersisa',
   DIHENTIKAN_PESERTA: 'Peserta berhenti menjawab',
   BATAS_WAKTU: 'Batas waktu menjawab terlewati',
 };
 
-/** One sentence on what the two claim-level scores are, shown wherever they appear. */
+/** Fraud indication level, read against the thresholds in the AI configuration. */
+export const FRAUD_LEVEL_LABEL: Record<FraudLevel, string> = {
+  RENDAH: 'Indikasi rendah',
+  SEDANG: 'Indikasi sedang',
+  TINGGI: 'Indikasi tinggi',
+};
+
+/** What each level does to the session. */
+export const FRAUD_LEVEL_EFFECT: Record<FraudLevel, string> = {
+  RENDAH: 'AI melanjutkan dengan pertanyaan yang paling mungkin dijawab pasti.',
+  SEDANG: 'AI melanjutkan dengan pertanyaan konfirmasi (pengalaman paling mudah dikenali).',
+  TINGGI: 'Sesi berhenti; klaim didahulukan untuk diperiksa verifikator.',
+};
+
+/** One sentence on what the claim-level scores are, shown wherever they appear. */
 export const SCORE_DISCLAIMER =
-  'Skor indikasi dan dukungan dihitung dengan aturan dari jawaban peserta (simulasi). Skor ini mengurutkan pekerjaan verifikator; bukan probabilitas fraud yang tervalidasi dan bukan keputusan.';
+  'Skor indikasi fraud dihitung dengan aturan dari skor fraud pilihan jawaban yang dipilih peserta, dibobot keandalan; tingkatnya ditentukan ambang di Konfigurasi AI. Simulasi: skor ini mengurutkan dan menghentikan pertanyaan, bukan probabilitas fraud yang tervalidasi dan bukan keputusan.';
