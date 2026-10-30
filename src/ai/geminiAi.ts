@@ -34,7 +34,15 @@ export function setGeminiApiKey(key: string): void {
 export function getGeminiModel(): string {
   if (typeof window !== 'undefined' && window.localStorage) {
     const stored = window.localStorage.getItem(GEMINI_MODEL_STORAGE_KEY);
-    if (stored?.trim()) return stored.trim();
+    if (stored?.trim()) {
+      const s = stored.trim();
+      // Auto-migrate legacy/deprecated models that Google no longer serves to new users
+      if (s === 'gemini-2.5-flash' || s === 'gemini-1.5-flash') {
+        window.localStorage.setItem(GEMINI_MODEL_STORAGE_KEY, DEFAULT_GEMINI_MODEL);
+        return DEFAULT_GEMINI_MODEL;
+      }
+      return s;
+    }
   }
   return DEFAULT_GEMINI_MODEL;
 }
@@ -86,7 +94,7 @@ interface GeminiStructuredDraft {
 }
 
 export async function draftWithGemini(request: DraftRequest, apiKey: string): Promise<DraftResponse> {
-  const model = getGeminiModel();
+  let model = getGeminiModel();
   const { target, claim, analysis } = request;
   const line = analysis ? claim?.procedures.find((p) => p.lineId === analysis.lineId) : undefined;
   const quantity = line?.quantity ?? 1;
@@ -170,11 +178,22 @@ Kembalikan jawaban dalam format JSON murni sesuai skema.`;
     },
   };
 
-  const res = await fetch(url, {
+  let res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
+
+  if (!res.ok && model !== 'gemini-3.8-flash') {
+    // Auto-retry with gemini-3.8-flash if primary model fails
+    model = 'gemini-3.8-flash';
+    const retryUrl = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey.trim())}`;
+    res = await fetch(retryUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  }
 
   if (!res.ok) {
     const errorBody = await res.json().catch(() => ({}));
@@ -254,7 +273,7 @@ Kembalikan jawaban dalam format JSON murni sesuai skema.`;
 export const geminiAi: QuestionAi = {
   get info(): AiModelInfo {
     const key = getGeminiApiKey();
-    const model = getGeminiModel();
+    let model = getGeminiModel();
     if (key) {
       return {
         id: model,
