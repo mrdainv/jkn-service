@@ -11,6 +11,8 @@ node_modules
 dist
 dist-ssr
 *.local
+.env.local
+.env.*.local
 
 # Simulation database written by plugins/db-file-store.ts (and older prototype state)
 local-data/

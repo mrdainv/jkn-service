@@ -1,0 +1,16 @@
+{
+  "model_id": "planner-sim",
+  "version": "2.0",
+  "target_event": "E1_JAWABAN_PASTI",
+  "calibration_method": "Isotonic Regression + Platt Scaling",
+  "ece_score": 0.0973,
+  "brier_skill_score": 0.06,
+  "standard": "TRIPOD+AI 2024 Guidelines",
+  "weights": {
+    "alpha_decay": 0.004,
+    "age_65_penalty": -0.18,
+    "uncalibrated_scale": 1.9,
+    "calibrated_scale": 0.96
+  },
+  "knowledge_base_size": 10
+}

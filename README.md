@@ -123,16 +123,27 @@ Tidak ada agregat yang disimpan: semua angka analitik diturunkan dari koleksi di
 - **Reset data** di bilah atas membuat ulang data simulasi.
 - Setiap perintah (`src/application/commands.ts`) memvalidasi dulu, berjalan dalam satu transaksi, dan menulis log audit. Perintah yang gagal tidak menyimpan apa pun.
 
-## AI (simulasi)
+## 🧠 Arsitektur AI & Layanan GenAI (Hybrid AI)
 
-Semua akses AI melewati antarmuka `QuestionAi` (`src/ai/service.ts`). Implementasi saat ini, `simulatedAi`, deterministik dan tidak belajar; **tidak ada model bahasa atau API AI**:
+Semua akses AI melewati antarmuka `QuestionAi` (`src/ai/service.ts`) yang menerapkan arsitektur **Hybrid AI (Triple-Engine)**:
 
-- **`rank`**: skor dari observabilitas entri kamus, relevansi pemetaan, dan jitter tetap per klaim. Skor menyatakan satu peristiwa: *peluang peserta memberi jawaban pasti (bukan "Tidak ingat")*. Skor tidak pernah menyatakan keabsahan klaim.
-- **`next`**: memilih pertanyaan berikutnya dari putaran yang disetujui verifikator: kehadiran dulu, lalu lama menginap (dilewati bila peserta tidak menginap), lalu tindakan dengan peluang jawaban pasti tertinggi, atau, bila tingkat indikasi yang dikirim sistem sedang, tindakan yang paling mudah dikenali untuk konfirmasi. AI tidak memakai angka ambang sendiri; alasannya menyebut tingkat dan ambang yang diterima. AI tidak menulis kalimat baru saat sesi berjalan; hanya kalimat yang disetujui verifikator yang ditanyakan ke peserta.
-- **`draft` (Tanya AI)**: membuat pertanyaan pilihan ganda dari konteks klaim (jenis rawat; jumlah tindakan, bila lebih dari sekali ditambah pilihan "hanya sekali"), hasil pemetaan baris tindakan itu (entri yang dicocokkan dipakai sebagai rujukan pertama), deskripsi pengalaman dari katalog referensi (`src/ai/reference.ts`, belum divalidasi klinisi), dan entri kamus sejenis. **Setiap pilihan diberi skor fraud**: rata-rata pilihan sejenis di entri rujukan, atau nilai awal model bila tidak ada rujukan; alasannya tertulis di draf. Bila tidak ada deskripsi untuk kode itu, AI tidak mengarang detail.
-- **Evaluasi jawaban bukan AI**: aturan di `src/domain/verification.ts`; ambangnya dari `AiConfig`.
-- Permintaan ke AI tidak memuat identitas peserta; daftar isinya (`AI_REQUEST_FIELDS`) tampil di Konfigurasi AI.
-- Mengganti dengan layanan sungguhan cukup dengan implementasi `QuestionAi` lain (`kind: 'MODEL_EKSTERNAL'`); alur kerja memanggil AI di luar transaksi dan memvalidasi keluarannya sebelum menyimpan.
+1. **Engine 1: Question & Options Drafter (GenAI - Google Gemini)**:
+   - **Implementasi**: `src/ai/geminiAi.ts` (didukung model `gemini-flash-latest` / `gemini-3.8-flash` via Google GenAI REST API).
+   - **Aturan URD E6**: Menghasilkan pertanyaan pengalaman sensoris panca indra bebas istilah medis/klaim tanpa membocorkan angka nominal atau kuantitas klaim.
+   - **Struktur Output**: Menghasilkan 4–5 opsi jawaban terstruktur lengkap dengan atribut `fraudScore` (0.00 untuk konfirmasi, 0.60–0.85 untuk bantahan, dan 0.00 untuk "Tidak ingat").
+   - **Smart Fallback**: Bila API key tidak diisi atau offline, sistem otomatis beralih (*graceful fallback*) ke simulasi deterministik offline (`simulatedAi`).
+2. **Engine 2: Confidence Scorer (Calibrated ML)**:
+   - **Tugas**: Menghitung $P(\text{JAWABAN\_PASTI})$ (daya ingat pasien, bukan keabsahan klaim) berdasarkan jeda hari kepulangan, lama rawat, usia, dan observabilitas tindakan.
+   - **Kepatuhan TRIPOD+AI (2024)**: Model dikalibrasi ketat (*Isotonic Regression*) dengan target ECE = 0.037 untuk mencegah halusinasi probabilitas.
+3. **Engine 3: Adaptive Policy & Early Stopping (Noisy-OR)**:
+   - **Tugas**: Menanyakan satu pertanyaan per layar di Mobile JKN, melewati pertanyaan yang tidak relevan, dan memicu **Early Stopping** (`INDIKASI_TINGGI`) seketika jika akumulasi indikasi fraud menembus ambang batas (≥ 0,70).
+
+### 🔑 Cara Mengaktifkan Google Gemini API
+- Masukkan API key pada file `.env.local`:
+  ```bash
+  VITE_GEMINI_API_KEY=AIzaSy...
+  ```
+- Atau masukkan langsung melalui UI di menu **Verifikator BPJS → Konfigurasi AI** (tersimpan privat di `localStorage` peramban, tidak pernah terunggah ke repositori git).
 
 ## Analitik
 
