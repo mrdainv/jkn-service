@@ -1,6 +1,6 @@
 import { Building2, ClipboardCheck, RotateCcw, ShieldCheck, Smartphone } from 'lucide-react';
 import { useState, type ComponentType } from 'react';
-import { geminiAi } from './ai/geminiAi';
+import { activeAi } from './ai/activeAi';
 import { AppProvider } from './application/AppProvider';
 import { useAction, useApp } from './application/context';
 import type { DbStore } from './data/store';
@@ -110,7 +110,7 @@ function Shell() {
 
 export default function App({ store, pollMs }: { store: DbStore; pollMs?: number }) {
   return (
-    <AppProvider store={store} ai={geminiAi} pollMs={pollMs}>
+    <AppProvider store={store} ai={activeAi} pollMs={pollMs}>
       <Shell />
     </AppProvider>
   );

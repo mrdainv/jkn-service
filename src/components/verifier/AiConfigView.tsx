@@ -1,14 +1,31 @@
-import { Eye, EyeOff, Save, Sparkles } from 'lucide-react';
-import { getGeminiApiKey, getGeminiModel, setGeminiApiKey, setGeminiModel, testGeminiConnection } from '../../ai/geminiAi';
+import { Eye, EyeOff, Save, Server, Sparkles } from 'lucide-react';
 import { useState } from 'react';
-import { useAction, useApp } from '../../application/context';
+import { getAiProvider, setAiProvider, type AiProvider } from '../../ai/activeAi';
+import {
+  DEFAULT_DEEPSEEK_ENDPOINT,
+  getDeepSeekApiKey,
+  getDeepSeekEndpoint,
+  getDeepSeekModel,
+  setDeepSeekApiKey,
+  setDeepSeekEndpoint,
+  setDeepSeekModel,
+  testDeepSeekConnection,
+} from '../../ai/deepseekAi';
+import {
+  getGeminiApiKey,
+  getGeminiModel,
+  setGeminiApiKey,
+  setGeminiModel,
+  testGeminiConnection,
+} from '../../ai/geminiAi';
 import { AI_REQUEST_FIELDS } from '../../ai/service';
 import { MAX_POOL_QUESTIONS, RESPONSE_WINDOW_DAYS } from '../../application/commands';
+import { useAction, useApp } from '../../application/context';
 import { FRAUD_LEVEL_EFFECT, FRAUD_LEVEL_LABEL } from '../../domain/labels';
 import { DEFAULT_OBSERVABILITY, EVALUATION_RULES } from '../../domain/verification';
 import { formatDateTime, formatScore } from '../../lib/format';
-import { Badge, Button, Card, Field, KeyValue, Notice, PageHeader } from '../ui';
 import { cx, inputCls, td, th } from '../styles';
+import { Badge, Button, Card, Field, KeyValue, Notice, PageHeader } from '../ui';
 import { VERIFIER_ACTOR } from './actor';
 
 export function AiConfigView() {
@@ -24,12 +41,27 @@ export function AiConfigView() {
   });
   const [save, state] = useAction(actions.updateAiConfig);
   const [saved, setSaved] = useState(false);
+
+  // Active Provider
+  const [provider, setProviderState] = useState<AiProvider>(getAiProvider);
+
+  // Gemini state
   const [geminiKey, setGeminiKey] = useState(getGeminiApiKey);
   const [geminiModelChoice, setGeminiModelChoice] = useState(getGeminiModel);
-  const [showKey, setShowKey] = useState(false);
-  const [testingKey, setTestingKey] = useState(false);
-  const [savedKey, setSavedKey] = useState(false);
-  const [testStatus, setTestStatus] = useState<{ ok: boolean; message: string } | null>(null);
+  const [showGeminiKey, setShowGeminiKey] = useState(false);
+  const [testingGemini, setTestingGemini] = useState(false);
+  const [savedGeminiKey, setSavedGeminiKey] = useState(false);
+  const [testGeminiStatus, setTestGeminiStatus] = useState<{ ok: boolean; message: string } | null>(null);
+
+  // DeepSeek state
+  const [deepseekKey, setDeepSeekKey] = useState(getDeepSeekApiKey);
+  const [deepseekModelChoice, setDeepSeekModelChoice] = useState(getDeepSeekModel);
+  const [deepseekEndpointChoice, setDeepSeekEndpointChoice] = useState(getDeepSeekEndpoint);
+  const [showDeepSeekKey, setShowDeepSeekKey] = useState(false);
+  const [testingDeepSeek, setTestingDeepSeek] = useState(false);
+  const [savedDeepSeekKey, setSavedDeepSeekKey] = useState(false);
+  const [testDeepSeekStatus, setTestDeepSeekStatus] = useState<{ ok: boolean; message: string } | null>(null);
+
   const patch = {
     mappingThreshold: Number(form.mappingThreshold),
     autoSelectThreshold: Number(form.autoSelectThreshold),
@@ -42,18 +74,39 @@ export function AiConfigView() {
   const history = [...db.aiConfigHistory, cfg].reverse();
   const field = (key: keyof typeof form, label: string, hint: string, step = '0.05', max = '1', min = '0') => (
     <Field label={label} htmlFor={key} hint={hint}>
-      <input id={key} type="number" step={step} min={min} max={max} className={inputCls} value={form[key]} onChange={(e) => { setSaved(false); setForm({ ...form, [key]: e.target.value }); }} />
+      <input
+        id={key}
+        type="number"
+        step={step}
+        min={min}
+        max={max}
+        className={inputCls}
+        value={form[key]}
+        onChange={(e) => {
+          setSaved(false);
+          setForm({ ...form, [key]: e.target.value });
+        }}
+      />
     </Field>
   );
+
+  const handleProviderChange = (newP: AiProvider) => {
+    setProviderState(newP);
+    setAiProvider(newP);
+  };
+
   return (
     <>
-      <PageHeader title="Konfigurasi AI" subtitle="Pengaturan yang dipakai sistem. Bagian ini berisi konfigurasi, bukan metrik; dampaknya terlihat di Analitik AI." />
+      <PageHeader
+        title="Konfigurasi AI"
+        subtitle="Pengaturan yang dipakai sistem. Bagian ini berisi konfigurasi, bukan metrik; dampaknya terlihat di Analitik AI."
+      />
       <div className="grid gap-4 lg:grid-cols-3">
         <Card title="Layanan AI" className="lg:col-span-1">
           <KeyValue
             cols={1}
             items={[
-              ['Mode', <Badge key="mode" tone={ai.info.kind === 'MODEL_EKSTERNAL' ? 'good' : 'warn'}>{ai.info.label}</Badge>],
+              ['Mode Aktif', <Badge key="mode" tone={ai.info.kind === 'MODEL_EKSTERNAL' ? 'good' : 'warn'}>{ai.info.label}</Badge>],
               ['Model', <span key="model" className="font-mono">{ai.info.id} v{ai.info.version}</span>],
               ['Yang diprediksi skor', ai.info.confidenceEventText],
               ['Peringkat (saat klaim diajukan)', AI_REQUEST_FIELDS.rank.join(', ')],
@@ -63,11 +116,19 @@ export function AiConfigView() {
               ['Batas waktu menjawab', `${RESPONSE_WINDOW_DAYS} hari (ditetapkan sistem)`],
             ]}
           />
+
           <Notice kind={ai.info.kind === 'MODEL_EKSTERNAL' ? 'success' : 'info'} className="mt-3">
-            {ai.info.kind === 'MODEL_EKSTERNAL'
-              ? 'Layanan GenAI nyata aktif. Draf pertanyaan dan opsi jawaban akan disusun langsung oleh Google Gemini berbasis pengalaman sensoris URD v0.4 (E6).'
-              : 'Mode simulasi deterministik aktif. Masukkan Google Gemini API Key pada form di bawah untuk mengaktifkan AI generatif nyata.'}
+            {ai.info.kind === 'MODEL_EKSTERNAL' ? (
+              provider === 'deepseek' ? (
+                <>Layanan GenAI <b>DeepSeek</b> aktif. Draf pertanyaan sensoris disusun menggunakan <b>{deepseekModelChoice}</b> {deepseekEndpointChoice.includes('localhost') ? '(Server Lokal On-Premise)' : '(DeepSeek Cloud)'} sesuai URD v0.4 (E6).</>
+              ) : (
+                <>Layanan GenAI <b>Google Gemini</b> aktif. Draf pertanyaan sensoris disusun langsung oleh <b>{geminiModelChoice}</b> berbasis URD v0.4 (E6).</>
+              )
+            ) : (
+              'Mode simulasi deterministik aktif. Pilih provider DeepSeek atau Google Gemini dan masukkan API Key di bawah untuk mengaktifkan AI generatif nyata.'
+            )}
           </Notice>
+
           <div className="mt-3 text-xs text-slate-600">
             <div className="font-medium text-slate-700">Evaluasi jawaban ({EVALUATION_RULES}, aturan, bukan AI)</div>
             <ul className="mt-1 list-disc space-y-0.5 pl-4">
@@ -86,99 +147,250 @@ export function AiConfigView() {
               ))}
             </ul>
           </div>
-          <div className="mt-4 border-t border-slate-100 pt-3">
-            <div className="flex items-center gap-1.5 text-xs font-medium text-slate-800">
-              <Sparkles className="h-3.5 w-3.5 text-violet-600" aria-hidden />
-              Koneksi Google Gemini API (GenAI)
-            </div>
-            <div className="mt-2 space-y-2">
-              <Field label="Gemini API Key" htmlFor="gemini-key" hint="Disimpan aman di browser lokal Anda (localStorage)">
-                <div className="relative">
-                  <input
-                    id="gemini-key"
-                    type={showKey ? 'text' : 'password'}
-                    className={cx(inputCls, 'pr-8 font-mono text-xs')}
-                    value={geminiKey}
-                    placeholder="AIzaSy..."
-                    onChange={(e) => {
-                      setGeminiKey(e.target.value);
-                      setTestStatus(null);
-                    }}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowKey(!showKey)}
-                    className="absolute right-2 top-2 text-slate-400 hover:text-slate-600"
-                    title={showKey ? 'Sembunyikan' : 'Tampilkan'}
-                  >
-                    {showKey ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-                  </button>
-                </div>
-              </Field>
 
-              <Field label="Model Gemini" htmlFor="gemini-model">
+          {/* Provider Selection Section */}
+          <div className="mt-4 border-t border-slate-100 pt-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5 text-xs font-medium text-slate-800">
+                <Sparkles className="h-3.5 w-3.5 text-violet-600" aria-hidden />
+                Pilihan Provider GenAI (Engine 1)
+              </div>
+            </div>
+
+            <div className="mt-2 space-y-3">
+              <Field label="Provider LLM Aktif" htmlFor="llm-provider" hint="Pilih model GenAI untuk merumuskan draf pertanyaan sensoris">
                 <select
-                  id="gemini-model"
-                  className={cx(inputCls, 'text-xs')}
-                  value={geminiModelChoice}
-                  onChange={(e) => setGeminiModelChoice(e.target.value)}
+                  id="llm-provider"
+                  className={cx(inputCls, 'text-xs font-medium')}
+                  value={provider}
+                  onChange={(e) => handleProviderChange(e.target.value as AiProvider)}
                 >
-                  <option value="gemini-flash-latest">Gemini Flash Latest (Direkomendasikan)</option>
-                  <option value="gemini-3.8-flash">Gemini 3.8 Flash</option>
-                  <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                  <option value="deepseek">DeepSeek (Cloud / On-Premise Lokal BPJS)</option>
+                  <option value="gemini">Google Gemini (Cloud)</option>
+                  <option value="simulation">Simulasi Deterministik (Offline / Tanpa Kunci)</option>
                 </select>
               </Field>
 
-              <div className="flex flex-wrap items-center gap-1.5 pt-1">
-                <Button
-                  size="sm"
-                  variant="primary"
-                  onClick={() => {
-                    setGeminiApiKey(geminiKey);
-                    setGeminiModel(geminiModelChoice);
-                    setSavedKey(true);
-                    setTimeout(() => setSavedKey(false), 3000);
-                  }}
-                >
-                  {savedKey ? 'Tersimpan!' : 'Simpan Kunci'}
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  pending={testingKey}
-                  onClick={async () => {
-                    setTestingKey(true);
-                    const res = await testGeminiConnection(geminiKey, geminiModelChoice);
-                    setTestingKey(false);
-                    setTestStatus(res);
-                  }}
-                >
-                  Uji Koneksi
-                </Button>
-                {geminiKey && (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => {
-                      setGeminiKey('');
-                      setGeminiApiKey('');
-                      setTestStatus(null);
-                    }}
-                  >
-                    Hapus
-                  </Button>
-                )}
-              </div>
+              {/* DeepSeek Configuration Box */}
+              {provider === 'deepseek' && (
+                <div className="rounded-lg border border-indigo-100 bg-indigo-50/30 p-3 space-y-2.5">
+                  <div className="flex items-center gap-1 text-xs font-semibold text-indigo-900">
+                    <Server className="h-3.5 w-3.5 text-indigo-600" />
+                    Pengaturan DeepSeek (Cloud / Server On-Premise)
+                  </div>
 
-              {testStatus && (
-                <Notice kind={testStatus.ok ? 'success' : 'error'} className="mt-2 text-xs">
-                  {testStatus.message}
-                </Notice>
+                  <Field label="Endpoint API / Server" htmlFor="deepseek-endpoint" hint="Gunakan DeepSeek Cloud atau Server Ollama lokal instansi">
+                    <select
+                      id="deepseek-endpoint"
+                      className={cx(inputCls, 'text-xs')}
+                      value={deepseekEndpointChoice}
+                      onChange={(e) => {
+                        setDeepSeekEndpointChoice(e.target.value);
+                        setTestDeepSeekStatus(null);
+                      }}
+                    >
+                      <option value={DEFAULT_DEEPSEEK_ENDPOINT}>DeepSeek Cloud (api.deepseek.com)</option>
+                      <option value="http://localhost:11434/v1">Server Lokal Ollama (http://localhost:11434/v1)</option>
+                      <option value="http://127.0.0.1:8000/v1">Server Lokal vLLM (http://127.0.0.1:8000/v1)</option>
+                    </select>
+                  </Field>
+
+                  <Field
+                    label="DeepSeek API Key"
+                    htmlFor="deepseek-key"
+                    hint={deepseekEndpointChoice.includes('localhost') || deepseekEndpointChoice.includes('127.0.0.1')
+                      ? 'Server lokal (Ollama) tidak memerlukan API key (boleh kosong).'
+                      : 'Disimpan aman di browser lokal Anda (localStorage).'}
+                  >
+                    <div className="relative">
+                      <input
+                        id="deepseek-key"
+                        type={showDeepSeekKey ? 'text' : 'password'}
+                        className={cx(inputCls, 'pr-8 font-mono text-xs')}
+                        value={deepseekKey}
+                        placeholder={deepseekEndpointChoice.includes('localhost') ? '(Opsional untuk lokal)' : 'sk-...'}
+                        onChange={(e) => {
+                          setDeepSeekKey(e.target.value);
+                          setTestDeepSeekStatus(null);
+                        }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowDeepSeekKey(!showDeepSeekKey)}
+                        className="absolute right-2 top-2 text-slate-400 hover:text-slate-600"
+                        title={showDeepSeekKey ? 'Sembunyikan' : 'Tampilkan'}
+                      >
+                        {showDeepSeekKey ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                      </button>
+                    </div>
+                  </Field>
+
+                  <Field label="Model DeepSeek" htmlFor="deepseek-model">
+                    <select
+                      id="deepseek-model"
+                      className={cx(inputCls, 'text-xs')}
+                      value={deepseekModelChoice}
+                      onChange={(e) => setDeepSeekModelChoice(e.target.value)}
+                    >
+                      <option value="deepseek-chat">deepseek-chat (DeepSeek-V3 - Cepat & Bahasa Luwes)</option>
+                      <option value="deepseek-reasoner">deepseek-reasoner (DeepSeek-R1 - Penalaran Medis)</option>
+                      <option value="deepseek-r1:8b">deepseek-r1:8b (Model Lokal Ollama 8B)</option>
+                      <option value="deepseek-r1:14b">deepseek-r1:14b (Model Lokal Ollama 14B)</option>
+                    </select>
+                  </Field>
+
+                  <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      onClick={() => {
+                        setDeepSeekApiKey(deepseekKey);
+                        setDeepSeekModel(deepseekModelChoice);
+                        setDeepSeekEndpoint(deepseekEndpointChoice);
+                        setSavedDeepSeekKey(true);
+                        setTimeout(() => setSavedDeepSeekKey(false), 3000);
+                      }}
+                    >
+                      {savedDeepSeekKey ? 'Tersimpan!' : 'Simpan Pengaturan'}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      pending={testingDeepSeek}
+                      onClick={async () => {
+                        setTestingDeepSeek(true);
+                        const res = await testDeepSeekConnection(deepseekKey, deepseekModelChoice, deepseekEndpointChoice);
+                        setTestingDeepSeek(false);
+                        setTestDeepSeekStatus(res);
+                      }}
+                    >
+                      Uji Koneksi
+                    </Button>
+                    {deepseekKey && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => {
+                          setDeepSeekKey('');
+                          setDeepSeekApiKey('');
+                          setTestDeepSeekStatus(null);
+                        }}
+                      >
+                        Hapus Kunci
+                      </Button>
+                    )}
+                  </div>
+
+                  {testDeepSeekStatus && (
+                    <Notice kind={testDeepSeekStatus.ok ? 'success' : 'error'} className="mt-2 text-xs">
+                      {testDeepSeekStatus.message}
+                    </Notice>
+                  )}
+                </div>
+              )}
+
+              {/* Gemini Configuration Box */}
+              {provider === 'gemini' && (
+                <div className="rounded-lg border border-violet-100 bg-violet-50/30 p-3 space-y-2.5">
+                  <div className="flex items-center gap-1 text-xs font-semibold text-violet-900">
+                    <Sparkles className="h-3.5 w-3.5 text-violet-600" />
+                    Pengaturan Google Gemini API
+                  </div>
+
+                  <Field label="Gemini API Key" htmlFor="gemini-key" hint="Disimpan aman di browser lokal Anda (localStorage)">
+                    <div className="relative">
+                      <input
+                        id="gemini-key"
+                        type={showGeminiKey ? 'text' : 'password'}
+                        className={cx(inputCls, 'pr-8 font-mono text-xs')}
+                        value={geminiKey}
+                        placeholder="AIzaSy..."
+                        onChange={(e) => {
+                          setGeminiKey(e.target.value);
+                          setTestGeminiStatus(null);
+                        }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowGeminiKey(!showGeminiKey)}
+                        className="absolute right-2 top-2 text-slate-400 hover:text-slate-600"
+                        title={showGeminiKey ? 'Sembunyikan' : 'Tampilkan'}
+                      >
+                        {showGeminiKey ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                      </button>
+                    </div>
+                  </Field>
+
+                  <Field label="Model Gemini" htmlFor="gemini-model">
+                    <select
+                      id="gemini-model"
+                      className={cx(inputCls, 'text-xs')}
+                      value={geminiModelChoice}
+                      onChange={(e) => setGeminiModelChoice(e.target.value)}
+                    >
+                      <option value="gemini-flash-latest">Gemini Flash Latest (Direkomendasikan)</option>
+                      <option value="gemini-3.8-flash">Gemini 3.8 Flash</option>
+                      <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                    </select>
+                  </Field>
+
+                  <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      onClick={() => {
+                        setGeminiApiKey(geminiKey);
+                        setGeminiModel(geminiModelChoice);
+                        setSavedGeminiKey(true);
+                        setTimeout(() => setSavedGeminiKey(false), 3000);
+                      }}
+                    >
+                      {savedGeminiKey ? 'Tersimpan!' : 'Simpan Kunci'}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      pending={testingGemini}
+                      onClick={async () => {
+                        setTestingGemini(true);
+                        const res = await testGeminiConnection(geminiKey, geminiModelChoice);
+                        setTestingGemini(false);
+                        setTestGeminiStatus(res);
+                      }}
+                    >
+                      Uji Koneksi
+                    </Button>
+                    {geminiKey && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => {
+                          setGeminiKey('');
+                          setGeminiApiKey('');
+                          setTestGeminiStatus(null);
+                        }}
+                      >
+                        Hapus Kunci
+                      </Button>
+                    )}
+                  </div>
+
+                  {testGeminiStatus && (
+                    <Notice kind={testGeminiStatus.ok ? 'success' : 'error'} className="mt-2 text-xs">
+                      {testGeminiStatus.message}
+                    </Notice>
+                  )}
+                </div>
               )}
             </div>
           </div>
         </Card>
-        <Card title={`Pengaturan aktif · versi ${cfg.version}`} subtitle={`Diubah ${formatDateTime(cfg.updatedAt)} oleh ${cfg.updatedBy.name}`} className="lg:col-span-2">
+
+        <Card
+          title={`Pengaturan aktif · versi ${cfg.version}`}
+          subtitle={`Diubah ${formatDateTime(cfg.updatedAt)} oleh ${cfg.updatedBy.name}`}
+          className="lg:col-span-2"
+        >
           <div className="grid gap-4 sm:grid-cols-2">
             {field('mappingThreshold', 'Ambang relevansi pemetaan', 'Kecocokan entri kamus di bawah nilai ini ditandai "di bawah ambang" dan tidak dipilih otomatis. Berlaku untuk klaim baru.')}
             {field('autoSelectThreshold', 'Ambang pilih otomatis (keyakinan AI)', 'Usulan dengan keyakinan AI di bawah nilai ini tetap ditampilkan tetapi tidak dicentang.')}
@@ -194,12 +406,21 @@ export function AiConfigView() {
           {state.error && <Notice kind="error" className="mt-3">{state.error}</Notice>}
           {saved && !state.error && <Notice kind="success" className="mt-3">Konfigurasi versi {cfg.version} tersimpan dan tercatat di log audit.</Notice>}
           <div className="mt-4 flex items-center gap-2">
-            <Button variant="primary" icon={Save} disabled={changed.length === 0} pending={state.pending} onClick={async () => { if (await save(patch, VERIFIER_ACTOR)) setSaved(true); }}>
+            <Button
+              variant="primary"
+              icon={Save}
+              disabled={changed.length === 0}
+              pending={state.pending}
+              onClick={async () => {
+                if (await save(patch, VERIFIER_ACTOR)) setSaved(true);
+              }}
+            >
               Simpan sebagai versi {cfg.version + 1}
             </Button>
             {changed.length > 0 && <span className="text-xs text-amber-800">{changed.length} perubahan belum disimpan</span>}
           </div>
         </Card>
+
         <Card title="Riwayat konfigurasi" className="lg:col-span-3" bodyClassName="p-0">
           <table className="w-full">
             <thead className="bg-slate-50">

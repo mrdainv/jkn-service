@@ -7,4 +7,13 @@ import { dbFileStore } from './plugins/db-file-store.ts'
 export default defineConfig({
   plugins: [react(), tailwindcss(), dbFileStore()],
   base: './',
+  server: {
+    proxy: {
+      '/api/deepseek': {
+        target: 'https://api.deepseek.com',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/deepseek/, ''),
+      },
+    },
+  },
 })
