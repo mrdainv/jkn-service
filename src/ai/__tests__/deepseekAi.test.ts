@@ -1,17 +1,14 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  DEFAULT_DEEPSEEK_ENDPOINT,
   DEFAULT_DEEPSEEK_MODEL,
   deepseekAi,
   draftWithDeepSeek,
   extractJsonFromText,
   getDeepSeekApiKey,
-  getDeepSeekEndpoint,
   getDeepSeekModel,
   resolveDeepSeekUrl,
   setDeepSeekApiKey,
-  setDeepSeekEndpoint,
   setDeepSeekModel,
   testDeepSeekConnection,
 } from '../deepseekAi';
@@ -22,31 +19,22 @@ describe('deepseekAi service', () => {
     localStorage.clear();
     setDeepSeekApiKey('');
     setDeepSeekModel(DEFAULT_DEEPSEEK_MODEL);
-    setDeepSeekEndpoint(DEFAULT_DEEPSEEK_ENDPOINT);
     vi.restoreAllMocks();
   });
 
-  it('manages DeepSeek API key, model, and endpoint storage in localStorage', () => {
+  it('manages DeepSeek API key and model storage in localStorage', () => {
     expect(getDeepSeekApiKey()).toBe('');
     expect(getDeepSeekModel()).toBe(DEFAULT_DEEPSEEK_MODEL);
-    expect(getDeepSeekEndpoint()).toBe(DEFAULT_DEEPSEEK_ENDPOINT);
 
     setDeepSeekApiKey('sk-test123456');
-    setDeepSeekModel('deepseek-reasoner');
-    setDeepSeekEndpoint('http://localhost:11434/v1');
+    setDeepSeekModel('deepseek-v4-flash');
 
     expect(getDeepSeekApiKey()).toBe('sk-test123456');
-    expect(getDeepSeekModel()).toBe('deepseek-reasoner');
-    expect(getDeepSeekEndpoint()).toBe('http://localhost:11434/v1');
+    expect(getDeepSeekModel()).toBe('deepseek-v4-flash');
   });
 
   it('correctly resolves endpoint URLs', () => {
-    expect(resolveDeepSeekUrl('http://localhost:11434/v1', '/chat/completions')).toBe(
-      'http://localhost:11434/v1/chat/completions',
-    );
-    expect(resolveDeepSeekUrl('https://my-proxy.com/api', '/chat/completions')).toBe(
-      'https://my-proxy.com/api/chat/completions',
-    );
+    expect(resolveDeepSeekUrl('/chat/completions')).toContain('/chat/completions');
   });
 
   it('extracts JSON from plain text or markdown fenced blocks', () => {
@@ -60,20 +48,16 @@ describe('deepseekAi service', () => {
     expect(extractJsonFromText(fencedNoLang)).toBe('{"hello": "world"}');
   });
 
-  it('reflects correct AiModelInfo kind and label depending on API key or local endpoint', () => {
+  it('reflects correct AiModelInfo kind and label depending on API key', () => {
     expect(deepseekAi.info.kind).toBe('SIMULASI_DETERMINISTIK');
 
     setDeepSeekApiKey('sk-valid');
     expect(deepseekAi.info.kind).toBe('MODEL_EKSTERNAL');
     expect(deepseekAi.info.label).toContain('DeepSeek');
-
-    setDeepSeekApiKey('');
-    setDeepSeekEndpoint('http://localhost:11434/v1');
-    expect(deepseekAi.info.kind).toBe('MODEL_EKSTERNAL');
   });
 
-  it('tests connection: fails when API key is empty on remote cloud endpoint', async () => {
-    const res = await testDeepSeekConnection('', 'deepseek-chat', 'https://api.deepseek.com');
+  it('tests connection: fails when API key is empty', async () => {
+    const res = await testDeepSeekConnection('', 'deepseek-v4-flash');
     expect(res.ok).toBe(false);
     expect(res.message).toContain('kosong');
   });
@@ -86,7 +70,7 @@ describe('deepseekAi service', () => {
       }),
     );
 
-    const res = await testDeepSeekConnection('sk-test', 'deepseek-chat');
+    const res = await testDeepSeekConnection('sk-test', 'deepseek-v4-flash');
     expect(res.ok).toBe(true);
     expect(res.message).toContain('Koneksi berhasil');
   });
@@ -153,7 +137,7 @@ describe('deepseekAi service', () => {
       variant: 0,
     };
 
-    const res = await draftWithDeepSeek(req, 'sk-test-key');
+    const res = await draftWithDeepSeek(req, 'sk-test-key', 'deepseek-v4-flash');
     expect(res.proposal.text).toContain('{faskes}');
     expect(res.proposal.options.length).toBe(4);
     expect(res.proposal.options.find((o) => o.id === 'KONFIRMASI')?.fraudScore).toBe(0.0);

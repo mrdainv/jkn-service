@@ -1,4 +1,4 @@
-import { deepseekAi, getDeepSeekApiKey, getDeepSeekEndpoint } from './deepseekAi';
+import { deepseekAi, getDeepSeekApiKey } from './deepseekAi';
 import { geminiAi, getGeminiApiKey } from './geminiAi';
 import { simulatedAi } from './simulatedAi';
 import type {
@@ -26,9 +26,7 @@ export function getAiProvider(): AiProvider {
 
   // Auto-detect based on available keys if not explicitly set
   const deepseekKey = getDeepSeekApiKey();
-  const deepseekEp = getDeepSeekEndpoint();
-  const isDeepSeekLocal = deepseekEp.includes('localhost') || deepseekEp.includes('127.0.0.1');
-  if (deepseekKey || isDeepSeekLocal) {
+  if (deepseekKey) {
     return 'deepseek';
   }
 
@@ -37,7 +35,7 @@ export function getAiProvider(): AiProvider {
     return 'gemini';
   }
 
-  return 'gemini';
+  return 'deepseek';
 }
 
 export function setAiProvider(provider: AiProvider): void {
@@ -48,7 +46,7 @@ export function setAiProvider(provider: AiProvider): void {
 
 /**
  * Unified QuestionAi that dynamically routes drafting requests to the verifier's
- * chosen LLM provider (Google Gemini, DeepSeek Cloud / On-Premise, or Deterministic Simulation).
+ * chosen LLM provider (DeepSeek API, Google Gemini, or Deterministic Simulation).
  * Engine 2 (Calibrated ML ranker) and Engine 3 (Adaptive session policy) remain strictly
  * auditable and deterministic according to TRIPOD+AI & URD v0.4 guidelines.
  */

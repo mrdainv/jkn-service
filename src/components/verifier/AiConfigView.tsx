@@ -1,13 +1,11 @@
-import { Eye, EyeOff, Save, Server, Sparkles } from 'lucide-react';
+import { Eye, EyeOff, Save, Sparkles } from 'lucide-react';
 import { useState } from 'react';
 import { getAiProvider, setAiProvider, type AiProvider } from '../../ai/activeAi';
 import {
-  DEFAULT_DEEPSEEK_ENDPOINT,
+  DEFAULT_DEEPSEEK_MODEL,
   getDeepSeekApiKey,
-  getDeepSeekEndpoint,
   getDeepSeekModel,
   setDeepSeekApiKey,
-  setDeepSeekEndpoint,
   setDeepSeekModel,
   testDeepSeekConnection,
 } from '../../ai/deepseekAi';
@@ -56,7 +54,7 @@ export function AiConfigView() {
   // DeepSeek state
   const [deepseekKey, setDeepSeekKey] = useState(getDeepSeekApiKey);
   const [deepseekModelChoice, setDeepSeekModelChoice] = useState(getDeepSeekModel);
-  const [deepseekEndpointChoice, setDeepSeekEndpointChoice] = useState(getDeepSeekEndpoint);
+  const [customDeepseekModel, setCustomDeepseekModel] = useState('');
   const [showDeepSeekKey, setShowDeepSeekKey] = useState(false);
   const [testingDeepSeek, setTestingDeepSeek] = useState(false);
   const [savedDeepSeekKey, setSavedDeepSeekKey] = useState(false);
@@ -95,6 +93,8 @@ export function AiConfigView() {
     setAiProvider(newP);
   };
 
+  const activeDeepSeekModel = deepseekModelChoice === 'custom' ? customDeepseekModel.trim() || DEFAULT_DEEPSEEK_MODEL : deepseekModelChoice;
+
   return (
     <>
       <PageHeader
@@ -120,12 +120,12 @@ export function AiConfigView() {
           <Notice kind={ai.info.kind === 'MODEL_EKSTERNAL' ? 'success' : 'info'} className="mt-3">
             {ai.info.kind === 'MODEL_EKSTERNAL' ? (
               provider === 'deepseek' ? (
-                <>Layanan GenAI <b>DeepSeek</b> aktif. Draf pertanyaan sensoris disusun menggunakan <b>{deepseekModelChoice}</b> {deepseekEndpointChoice.includes('localhost') ? '(Server Lokal On-Premise)' : '(DeepSeek Cloud)'} sesuai URD v0.4 (E6).</>
+                <>Layanan GenAI <b>DeepSeek API</b> aktif. Draf pertanyaan sensoris disusun menggunakan <b>{activeDeepSeekModel}</b> sesuai URD v0.4 (E6).</>
               ) : (
                 <>Layanan GenAI <b>Google Gemini</b> aktif. Draf pertanyaan sensoris disusun langsung oleh <b>{geminiModelChoice}</b> berbasis URD v0.4 (E6).</>
               )
             ) : (
-              'Mode simulasi deterministik aktif. Pilih provider DeepSeek atau Google Gemini dan masukkan API Key di bawah untuk mengaktifkan AI generatif nyata.'
+              'Mode simulasi deterministik aktif. Masukkan API Key DeepSeek atau Gemini pada form di bawah untuk mengaktifkan AI generatif nyata.'
             )}
           </Notice>
 
@@ -165,8 +165,8 @@ export function AiConfigView() {
                   value={provider}
                   onChange={(e) => handleProviderChange(e.target.value as AiProvider)}
                 >
-                  <option value="deepseek">DeepSeek (Cloud / On-Premise Lokal BPJS)</option>
-                  <option value="gemini">Google Gemini (Cloud)</option>
+                  <option value="deepseek">DeepSeek API (api.deepseek.com)</option>
+                  <option value="gemini">Google Gemini API</option>
                   <option value="simulation">Simulasi Deterministik (Offline / Tanpa Kunci)</option>
                 </select>
               </Field>
@@ -175,40 +175,18 @@ export function AiConfigView() {
               {provider === 'deepseek' && (
                 <div className="rounded-lg border border-indigo-100 bg-indigo-50/30 p-3 space-y-2.5">
                   <div className="flex items-center gap-1 text-xs font-semibold text-indigo-900">
-                    <Server className="h-3.5 w-3.5 text-indigo-600" />
-                    Pengaturan DeepSeek (Cloud / Server On-Premise)
+                    <Sparkles className="h-3.5 w-3.5 text-indigo-600" />
+                    Pengaturan DeepSeek API
                   </div>
 
-                  <Field label="Endpoint API / Server" htmlFor="deepseek-endpoint" hint="Gunakan DeepSeek Cloud atau Server Ollama lokal instansi">
-                    <select
-                      id="deepseek-endpoint"
-                      className={cx(inputCls, 'text-xs')}
-                      value={deepseekEndpointChoice}
-                      onChange={(e) => {
-                        setDeepSeekEndpointChoice(e.target.value);
-                        setTestDeepSeekStatus(null);
-                      }}
-                    >
-                      <option value={DEFAULT_DEEPSEEK_ENDPOINT}>DeepSeek Cloud (api.deepseek.com)</option>
-                      <option value="http://localhost:11434/v1">Server Lokal Ollama (http://localhost:11434/v1)</option>
-                      <option value="http://127.0.0.1:8000/v1">Server Lokal vLLM (http://127.0.0.1:8000/v1)</option>
-                    </select>
-                  </Field>
-
-                  <Field
-                    label="DeepSeek API Key"
-                    htmlFor="deepseek-key"
-                    hint={deepseekEndpointChoice.includes('localhost') || deepseekEndpointChoice.includes('127.0.0.1')
-                      ? 'Server lokal (Ollama) tidak memerlukan API key (boleh kosong).'
-                      : 'Disimpan aman di browser lokal Anda (localStorage).'}
-                  >
+                  <Field label="DeepSeek API Key" htmlFor="deepseek-key" hint="Disimpan aman di browser lokal Anda (localStorage)">
                     <div className="relative">
                       <input
                         id="deepseek-key"
                         type={showDeepSeekKey ? 'text' : 'password'}
                         className={cx(inputCls, 'pr-8 font-mono text-xs')}
                         value={deepseekKey}
-                        placeholder={deepseekEndpointChoice.includes('localhost') ? '(Opsional untuk lokal)' : 'sk-...'}
+                        placeholder="sk-..."
                         onChange={(e) => {
                           setDeepSeekKey(e.target.value);
                           setTestDeepSeekStatus(null);
@@ -232,12 +210,25 @@ export function AiConfigView() {
                       value={deepseekModelChoice}
                       onChange={(e) => setDeepSeekModelChoice(e.target.value)}
                     >
-                      <option value="deepseek-chat">deepseek-chat (DeepSeek-V3 - Cepat & Bahasa Luwes)</option>
-                      <option value="deepseek-reasoner">deepseek-reasoner (DeepSeek-R1 - Penalaran Medis)</option>
-                      <option value="deepseek-r1:8b">deepseek-r1:8b (Model Lokal Ollama 8B)</option>
-                      <option value="deepseek-r1:14b">deepseek-r1:14b (Model Lokal Ollama 14B)</option>
+                      <option value="deepseek-v4-flash">deepseek-v4-flash (DeepSeek V4 Flash - Cepat & Hemat)</option>
+                      <option value="deepseek-reasoner">deepseek-reasoner (DeepSeek-R1 - Penalaran Medis Mendalam)</option>
+                      <option value="deepseek-chat">deepseek-chat (DeepSeek Chat)</option>
+                      <option value="custom">Kustom (Tulis nama model sendiri)</option>
                     </select>
                   </Field>
+
+                  {deepseekModelChoice === 'custom' && (
+                    <Field label="Nama Model Kustom" htmlFor="custom-deepseek-model" hint="Ketik model identifier resmi DeepSeek">
+                      <input
+                        id="custom-deepseek-model"
+                        type="text"
+                        className={cx(inputCls, 'font-mono text-xs')}
+                        placeholder="deepseek-v4-flash"
+                        value={customDeepseekModel}
+                        onChange={(e) => setCustomDeepseekModel(e.target.value)}
+                      />
+                    </Field>
+                  )}
 
                   <div className="flex flex-wrap items-center gap-1.5 pt-1">
                     <Button
@@ -245,8 +236,7 @@ export function AiConfigView() {
                       variant="primary"
                       onClick={() => {
                         setDeepSeekApiKey(deepseekKey);
-                        setDeepSeekModel(deepseekModelChoice);
-                        setDeepSeekEndpoint(deepseekEndpointChoice);
+                        setDeepSeekModel(activeDeepSeekModel);
                         setSavedDeepSeekKey(true);
                         setTimeout(() => setSavedDeepSeekKey(false), 3000);
                       }}
@@ -259,7 +249,7 @@ export function AiConfigView() {
                       pending={testingDeepSeek}
                       onClick={async () => {
                         setTestingDeepSeek(true);
-                        const res = await testDeepSeekConnection(deepseekKey, deepseekModelChoice, deepseekEndpointChoice);
+                        const res = await testDeepSeekConnection(deepseekKey, activeDeepSeekModel);
                         setTestingDeepSeek(false);
                         setTestDeepSeekStatus(res);
                       }}

@@ -14,9 +14,8 @@ import type {
 
 export const DEEPSEEK_API_KEY_STORAGE_KEY = 'selaras_deepseek_api_key';
 export const DEEPSEEK_MODEL_STORAGE_KEY = 'selaras_deepseek_model';
-export const DEEPSEEK_ENDPOINT_STORAGE_KEY = 'selaras_deepseek_endpoint';
-export const DEFAULT_DEEPSEEK_MODEL = 'deepseek-chat';
-export const DEFAULT_DEEPSEEK_ENDPOINT = 'https://api.deepseek.com';
+export const DEFAULT_DEEPSEEK_MODEL = 'deepseek-v4-flash';
+export const DEEPSEEK_API_URL = 'https://api.deepseek.com';
 
 export function getDeepSeekApiKey(): string {
   if (typeof window !== 'undefined' && window.localStorage) {
@@ -47,38 +46,15 @@ export function setDeepSeekModel(model: string): void {
   }
 }
 
-export function getDeepSeekEndpoint(): string {
-  if (typeof window !== 'undefined' && window.localStorage) {
-    const stored = window.localStorage.getItem(DEEPSEEK_ENDPOINT_STORAGE_KEY);
-    if (stored?.trim()) return stored.trim();
-  }
-  return DEFAULT_DEEPSEEK_ENDPOINT;
-}
-
-export function setDeepSeekEndpoint(endpoint: string): void {
-  if (typeof window !== 'undefined' && window.localStorage) {
-    window.localStorage.setItem(DEEPSEEK_ENDPOINT_STORAGE_KEY, endpoint.trim() || DEFAULT_DEEPSEEK_ENDPOINT);
-  }
-}
-
-export function resolveDeepSeekUrl(rawEndpoint = DEFAULT_DEEPSEEK_ENDPOINT, path = '/chat/completions'): string {
-  const ep = rawEndpoint.trim().replace(/\/+$/, '');
-  // If running in browser on localhost and targeting the official DeepSeek API, use Vite proxy to prevent CORS issues
+export function resolveDeepSeekUrl(path = '/chat/completions'): string {
+  // If running in browser on localhost, use Vite proxy to prevent CORS issues
   if (typeof window !== 'undefined' && window.location) {
     const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
-    if (isLocalhost && ep === 'https://api.deepseek.com') {
+    if (isLocalhost) {
       return `/api/deepseek${path}`;
     }
   }
-
-  // If user provided a path like '/v1' or full endpoint
-  if (ep.endsWith('/v1')) {
-    return `${ep}${path}`;
-  }
-  if (ep.includes('/chat/completions')) {
-    return ep;
-  }
-  return `${ep}${path}`;
+  return `${DEEPSEEK_API_URL}${path}`;
 }
 
 export function extractJsonFromText(rawText: string): string {
@@ -93,24 +69,18 @@ export function extractJsonFromText(rawText: string): string {
 export async function testDeepSeekConnection(
   apiKey: string,
   model = getDeepSeekModel(),
-  endpoint = getDeepSeekEndpoint(),
 ): Promise<{ ok: boolean; message: string }> {
-  const isLocalServer = endpoint.includes('localhost') || endpoint.includes('127.0.0.1');
-  if (!apiKey.trim() && !isLocalServer) {
+  if (!apiKey.trim()) {
     return { ok: false, message: 'API key DeepSeek kosong.' };
   }
   try {
-    const url = resolveDeepSeekUrl(endpoint, '/chat/completions');
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-    };
-    if (apiKey.trim()) {
-      headers['Authorization'] = `Bearer ${apiKey.trim()}`;
-    }
-
+    const url = resolveDeepSeekUrl('/chat/completions');
     const res = await fetch(url, {
       method: 'POST',
-      headers,
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey.trim()}`,
+      },
       body: JSON.stringify({
         model,
         messages: [{ role: 'user', content: 'Say OK' }],
@@ -148,7 +118,6 @@ export async function draftWithDeepSeek(
   request: DraftRequest,
   apiKey: string,
   model = getDeepSeekModel(),
-  endpoint = getDeepSeekEndpoint(),
 ): Promise<DraftResponse> {
   const { target, claim, analysis } = request;
   const line = analysis ? claim?.procedures.find((p) => p.lineId === analysis.lineId) : undefined;
@@ -205,14 +174,7 @@ Rujukan pola opsi dari kamus BPJS:
 
 Kembalikan jawaban dalam format JSON murni sesuai skema.`;
 
-  const url = resolveDeepSeekUrl(endpoint, '/chat/completions');
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  };
-  if (apiKey.trim()) {
-    headers['Authorization'] = `Bearer ${apiKey.trim()}`;
-  }
-
+  const url = resolveDeepSeekUrl('/chat/completions');
   const isReasoner = model === 'deepseek-reasoner' || model.includes('reasoner') || model.includes('r1');
 
   const payload: Record<string, unknown> = {
@@ -230,7 +192,10 @@ Kembalikan jawaban dalam format JSON murni sesuai skema.`;
 
   const res = await fetch(url, {
     method: 'POST',
-    headers,
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey.trim()}`,
+    },
     body: JSON.stringify(payload),
   });
 
@@ -310,10 +275,8 @@ export const deepseekAi: QuestionAi = {
   get info(): AiModelInfo {
     const key = getDeepSeekApiKey();
     const model = getDeepSeekModel();
-    const endpoint = getDeepSeekEndpoint();
-    const isLocalServer = endpoint.includes('localhost') || endpoint.includes('127.0.0.1');
 
-    if (key || isLocalServer) {
+    if (key) {
       return {
         id: model,
         version: '2026.1',
@@ -337,12 +300,10 @@ export const deepseekAi: QuestionAi = {
   draft: async (request: DraftRequest): Promise<DraftResponse> => {
     const key = getDeepSeekApiKey();
     const model = getDeepSeekModel();
-    const endpoint = getDeepSeekEndpoint();
-    const isLocalServer = endpoint.includes('localhost') || endpoint.includes('127.0.0.1');
 
-    if (key || isLocalServer) {
+    if (key) {
       try {
-        return await draftWithDeepSeek(request, key, model, endpoint);
+        return await draftWithDeepSeek(request, key, model);
       } catch (err) {
         console.warn('Gagal memanggil DeepSeek API, beralih ke simulasi deterministik:', err);
         const fallback = await simulatedAi.draft(request);
