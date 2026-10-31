@@ -17,14 +17,25 @@ const STRENGTHS: Strength[] = ['KUAT', 'SEBAGIAN', 'NETRAL', 'BERTENTANGAN'];
 
 /** Whether the score rule fixes this option's fraud score (so it is not edited by hand). */
 function fixedScore(o: AnswerOption): boolean {
-  return !!o.unsure || !!o.denial || (o.mapping.kind === 'TETAP' && (o.mapping.strength === 'KUAT' || o.mapping.strength === 'NETRAL'));
+  return !!o.unsure || (!!o.denial && o.fraudScore === 1) || (o.mapping.kind === 'TETAP' && (o.mapping.strength === 'KUAT' || o.mapping.strength === 'NETRAL'));
 }
 
 /** Edits participant wording, the answer → evidence mapping and each option's fraud score, with the system checks shown live. */
 export function QuestionEditor({ value, onChange, avoidTerms, idPrefix }: { value: QuestionDraft; onChange: (v: QuestionDraft) => void; avoidTerms: readonly string[]; idPrefix: string }) {
   const checks = checkQuestion(value.text, value.options, avoidTerms);
   const failed = checks.filter((c) => !c.ok);
-  const setOption = (i: number, patch: Partial<AnswerOption>) => onChange({ ...value, options: value.options.map((o, k) => (k === i ? { ...o, ...patch } : o)) });
+  const setOption = (i: number, patch: Partial<AnswerOption>) =>
+    onChange({
+      ...value,
+      options: value.options.map((o, k) => {
+        if (k !== i) return o;
+        const merged = { ...o, ...patch };
+        if (merged.fraudScore !== 1 && merged.denial) {
+          delete merged.denial;
+        }
+        return merged;
+      }),
+    });
   const nextId = () => {
     let n = value.options.length + 1;
     while (value.options.some((o) => o.id === `OPSI_${n}`)) n += 1;

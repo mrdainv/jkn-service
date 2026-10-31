@@ -3,7 +3,7 @@ import { useState } from 'react';
 import { useAction, useApp } from '../../application/context';
 import { editIsChange } from '../../application/commands';
 import { checkQuestion, checksPass } from '../../domain/checks';
-import type { AiDraft } from '../../domain/types';
+import type { AiDraft, AnswerOption } from '../../domain/types';
 import { formatDateTime, formatScore } from '../../lib/format';
 import { href } from '../../lib/router';
 import { Badge, Button, Notice } from '../ui';
@@ -22,7 +22,12 @@ const STATUS: Record<AiDraft['status'], { label: string; tone: 'violet' | 'good'
 export function DraftReview({ draft, compact }: { draft: AiDraft; compact?: boolean }) {
   const { db, actions } = useApp();
   const current = draft.edited ?? draft.proposal;
-  const [value, setValue] = useState<QuestionDraft>({ text: current.text, options: current.options });
+  const sanitizeOptions = (opts: readonly AnswerOption[]): AnswerOption[] =>
+    opts.map((o) => (o.denial && o.fraudScore !== 1 ? { ...o, denial: undefined } : o));
+  const [value, setValue] = useState<QuestionDraft>(() => ({
+    text: current.text,
+    options: sanitizeOptions(current.options),
+  }));
   const [reason, setReason] = useState('');
   const [discarding, setDiscarding] = useState(false);
   const [save, saveState] = useAction(actions.saveDraftEdits);

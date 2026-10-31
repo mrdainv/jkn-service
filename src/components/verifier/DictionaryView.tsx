@@ -39,6 +39,7 @@ export function DictionaryView({ entryId }: { entryId?: string }) {
 function EntryList() {
   const { db, actions } = useApp();
   const [ask, askState] = useAction(actions.askAi);
+  const [pendingCode, setPendingCode] = useState<string | null>(null);
   const gaps = useMemo(() => coverageGaps(db), [db]);
   const usage = useMemo(() => {
     const m = new Map<string, { claims: number; published: number }>();
@@ -102,11 +103,16 @@ function EntryList() {
                       <Button
                         size="sm"
                         icon={Sparkles}
-                        pending={askState.pending}
+                        pending={pendingCode === g.code && askState.pending}
                         onClick={async () => {
-                          const claimId = [...g.preparing][0] ?? null;
+                          setPendingCode(g.code);
+                          try {
+                            const claimId = [...g.preparing][0] ?? null;
                           const draft = await ask(claimId, { code: g.code, name: g.name, category: findProcedure(g.code)?.category ?? 'Tindakan' }, VERIFIER_ACTOR);
-                          if (draft) navigate(`/verifikator/draf/${draft.id}`);
+                            if (draft) navigate(`/verifikator/draf/${draft.id}`);
+                          } finally {
+                            setPendingCode(null);
+                          }
                         }}
                       >
                         Tanya AI

@@ -220,7 +220,7 @@ Kembalikan jawaban dalam format JSON murni sesuai skema.`;
       mapping: { kind: 'TETAP', strength: o.kekuatan },
       fraudScore: score,
       ...(o.unsure ? { unsure: true } : {}),
-      ...(o.denial ? { denial: true } : {}),
+      ...(o.denial && score === 1 ? { denial: true } : {}),
     };
   });
 
